@@ -48,7 +48,7 @@ dependencies:
 
 ```dart
 import 'package:flutter/material.dart';
-import 'package:fastpix_player/fastpix_player.dart';
+import 'package:fastpix_player/fastpix_video_player.dart';
 
 void main() {
   runApp(const MyApp());

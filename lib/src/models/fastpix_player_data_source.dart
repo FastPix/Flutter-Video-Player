@@ -1,8 +1,5 @@
 import 'package:better_player_plus/better_player_plus.dart';
-import '../enums/fastpix_player_enums.dart';
-import '../utils/fastpix_player_utils.dart';
-import 'fastpix_player_subtitle.dart';
-import 'fastpix_player_quality_control.dart';
+import 'package:fastpix_video_player/fastpix_video_player.dart';
 
 /// Supported streaming formats for FastPix Player
 enum FastPixStreamingFormat {
@@ -33,6 +30,14 @@ class FastPixPlayerDataSource {
   /// Video description
   final String? description;
 
+  final VideoDetailsData? videoData;
+  final List<String>? customData;
+
+  final FastPixPlayerVideoQuality? minResolution;
+  final FastPixPlayerVideoQuality? maxResolution;
+  final FastPixPlayerVideoQuality? resolution;
+  final FastpixPlayerRenditionOrder? renditionOrder;
+
   /// Video thumbnail URL
   final String? thumbnailUrl;
 
@@ -44,12 +49,6 @@ class FastPixPlayerDataSource {
 
   /// Video headers for authentication
   final Map<String, String>? headers;
-
-  /// Video quality options
-  final List<FastPixVideoQuality>? availableQualities;
-
-  /// Initial quality selection
-  final FastPixVideoQuality? initialQuality;
 
   /// Whether to cache the video
   final bool cacheEnabled;
@@ -78,17 +77,8 @@ class FastPixPlayerDataSource {
   /// End time for the video
   final Duration? endAt;
 
-  /// Quality control parameters
-  final FastPixPlayerQualityControl? qualityControl;
-
   /// Base URL for the streaming service
   static const String _baseUrl = 'https://stream.fastpix.io';
-  static const String _drmUrlWidevine =
-      'https://api.fastpix.app/v1/on-demand/drm/license/widevine';
-  static const String _drmUrlFairPlay =
-      'https://api.fastpix.app/v1/on-demand/drm/license/fairplay';
-  static const String _certificateUrlFairPlay =
-      'https://api.fastpix.app/v1/on-demand/drm/cert/fairplay';
 
   const FastPixPlayerDataSource({
     required this.playbackId,
@@ -96,14 +86,18 @@ class FastPixPlayerDataSource {
     this.customDomain,
     this.token,
     this.title,
+    this.videoData,
+    this.customData,
     this.description,
     this.thumbnailUrl,
     this.duration,
+    this.minResolution,
+    this.maxResolution,
+    this.renditionOrder,
+    this.resolution,
     this.streamType = StreamType.onDemand,
     this.headers,
-    this.availableQualities,
     this.drmEnabled = false,
-    this.initialQuality,
     this.cacheEnabled = true,
     this.cacheDirectory,
     this.maxCacheSize,
@@ -113,41 +107,7 @@ class FastPixPlayerDataSource {
     this.loop = false,
     this.startAt,
     this.endAt,
-    this.qualityControl,
   });
-
-  String get _certificateLicenseUrl {
-    if (playbackId.isEmpty) {
-      throw ArgumentError('Playback ID cannot be empty');
-    }
-    final hasToken = token?.isNotEmpty == true;
-    if (hasToken) {
-      return '$_certificateUrlFairPlay/$playbackId?token=$token';
-    }
-    return '$_certificateUrlFairPlay/$playbackId';
-  }
-
-  String get _drmLicenseFairPlay {
-    if (playbackId.isEmpty) {
-      throw ArgumentError('Playback ID cannot be empty');
-    }
-    final hasToken = token?.isNotEmpty == true;
-    if (hasToken) {
-      return '$_drmUrlFairPlay/$playbackId?token=$token';
-    }
-    return '$_drmUrlFairPlay/$playbackId';
-  }
-
-  String get _drmLicenseUrl {
-    if (playbackId.isEmpty) {
-      throw ArgumentError('Playback ID cannot be empty');
-    }
-    final hasToken = token?.isNotEmpty == true;
-    if (hasToken) {
-      return '$_drmUrlWidevine/$playbackId?token=$token';
-    }
-    return '$_drmUrlWidevine/$playbackId';
-  }
 
   /// Get the constructed streaming URL
   String get url {
@@ -159,7 +119,13 @@ class FastPixPlayerDataSource {
 
     final hasToken = token?.isNotEmpty == true;
     final hasCustomDomain = customDomain?.isNotEmpty == true;
-    final hasQualityControl = qualityControl?.hasParameters == true;
+    final hasQualityControl =
+        minResolution != null ||
+                maxResolution != null ||
+                resolution != null ||
+                renditionOrder != null
+            ? true
+            : false;
 
     // Build base URL
     String baseUrl;
@@ -177,9 +143,17 @@ class FastPixPlayerDataSource {
     }
 
     if (hasQualityControl) {
-      final qualityParams = qualityControl!.buildQueryParameters();
-      if (qualityParams.isNotEmpty) {
-        queryParams.add(qualityParams);
+      if (minResolution != FastPixPlayerVideoQuality.auto) {
+        queryParams.add('minResolution=${minResolution?.resolution}');
+      }
+      if (maxResolution != FastPixPlayerVideoQuality.auto) {
+        queryParams.add('maxResolution=${maxResolution?.resolution}');
+      }
+      if (resolution != FastPixPlayerVideoQuality.auto) {
+        queryParams.add('resolution=${resolution?.resolution}');
+      }
+      if (renditionOrder != FastpixPlayerRenditionOrder.auto) {
+        queryParams.add('renditionOrder=${renditionOrder?.order}');
       }
     }
 
@@ -189,6 +163,7 @@ class FastPixPlayerDataSource {
       baseUrl += '$separator${queryParams.join('&')}';
     }
 
+    // Debug logging removed for production
     return baseUrl;
   }
 
@@ -209,23 +184,15 @@ class FastPixPlayerDataSource {
     return BetterPlayerDataSource(
       BetterPlayerDataSourceType.network,
       url,
-      headers: enhancedHeaders,
-      liveStream: streamType == StreamType.live,
-      bufferingConfiguration: BetterPlayerBufferingConfiguration(
-        minBufferMs: 20000,
-        maxBufferMs: 50000,
-        bufferForPlaybackMs: 1500,
-        bufferForPlaybackAfterRebufferMs: 3000,
+      cacheConfiguration: BetterPlayerCacheConfiguration(
+        useCache: cacheEnabled,
+        maxCacheSize:
+            maxCacheSize ?? 100 * 1024 * 1024, // Default 100MB if not specified
+        preCacheSize: 10 * 1024 * 1024, // 10MB pre-cache
       ),
-      cacheConfiguration:
-          cacheEnabled
-              ? BetterPlayerCacheConfiguration(
-                useCache: true,
-                maxCacheSize: maxCacheSize ?? 10 * 1024 * 1024,
-                maxCacheFileSize: 10 * 1024 * 1024,
-              )
-              : null,
+      headers: enhancedHeaders,
       videoFormat: BetterPlayerVideoFormat.hls,
+      liveStream: streamType == StreamType.live,
     );
   }
 
@@ -239,8 +206,10 @@ class FastPixPlayerDataSource {
     Duration? duration,
     StreamType? streamType,
     Map<String, String>? headers,
-    List<FastPixVideoQuality>? availableQualities,
-    FastPixVideoQuality? initialQuality,
+    FastPixPlayerVideoQuality? minResolution,
+    FastPixPlayerVideoQuality? maxResolution,
+    FastPixPlayerVideoQuality? resolution,
+    FastpixPlayerRenditionOrder? renditionOrder,
     bool? cacheEnabled,
     String? cacheDirectory,
     int? maxCacheSize,
@@ -252,8 +221,9 @@ class FastPixPlayerDataSource {
     Duration? endAt,
     String? token,
     String? customDomain,
-    FastPixPlayerQualityControl? qualityControl,
     bool? drmEnabled,
+    VideoDetailsData? videoData,
+    List<String>? customData,
   }) {
     return FastPixPlayerDataSource(
       playbackId: playbackId ?? this.playbackId,
@@ -264,8 +234,6 @@ class FastPixPlayerDataSource {
       duration: duration ?? this.duration,
       streamType: streamType ?? this.streamType,
       headers: headers ?? this.headers,
-      availableQualities: availableQualities ?? this.availableQualities,
-      initialQuality: initialQuality ?? this.initialQuality,
       cacheEnabled: cacheEnabled ?? this.cacheEnabled,
       cacheDirectory: cacheDirectory ?? this.cacheDirectory,
       maxCacheSize: maxCacheSize ?? this.maxCacheSize,
@@ -277,8 +245,13 @@ class FastPixPlayerDataSource {
       endAt: endAt ?? this.endAt,
       token: token ?? this.token,
       customDomain: customDomain ?? this.customDomain,
-      qualityControl: qualityControl ?? this.qualityControl,
+      minResolution: minResolution ?? this.minResolution,
+      maxResolution: maxResolution ?? this.maxResolution,
+      resolution: resolution ?? this.resolution,
+      renditionOrder: renditionOrder ?? this.renditionOrder,
       drmEnabled: drmEnabled ?? this.drmEnabled,
+      customData: customData ?? this.customData,
+      videoData: videoData ?? this.videoData,
     );
   }
 
@@ -291,8 +264,10 @@ class FastPixPlayerDataSource {
     Duration? duration,
     StreamType streamType = StreamType.onDemand,
     Map<String, String>? headers,
-    List<FastPixVideoQuality>? availableQualities,
-    FastPixVideoQuality? initialQuality,
+    FastPixPlayerVideoQuality? minResolution,
+    FastPixPlayerVideoQuality? maxResolution,
+    FastPixPlayerVideoQuality? resolution,
+    FastpixPlayerRenditionOrder? renditionOrder,
     bool cacheEnabled = true,
     String? cacheDirectory,
     int? maxCacheSize,
@@ -304,8 +279,9 @@ class FastPixPlayerDataSource {
     Duration? endAt,
     String? token,
     String? customDomain,
-    FastPixPlayerQualityControl? qualityControl,
     bool drmEnabled = false,
+    VideoDetailsData? videoData,
+    List<String>? customData,
   }) {
     return FastPixPlayerDataSource(
       playbackId: playbackId,
@@ -316,8 +292,10 @@ class FastPixPlayerDataSource {
       duration: duration,
       streamType: streamType,
       headers: headers,
-      availableQualities: availableQualities,
-      initialQuality: initialQuality,
+      minResolution: minResolution,
+      maxResolution: maxResolution,
+      resolution: resolution,
+      renditionOrder: renditionOrder,
       cacheEnabled: cacheEnabled,
       cacheDirectory: cacheDirectory,
       maxCacheSize: maxCacheSize,
@@ -328,8 +306,9 @@ class FastPixPlayerDataSource {
       startAt: startAt,
       endAt: endAt,
       token: token,
+      videoData: videoData,
+      customData: customData,
       customDomain: customDomain,
-      qualityControl: qualityControl,
       drmEnabled: drmEnabled,
     );
   }

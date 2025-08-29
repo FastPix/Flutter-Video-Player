@@ -1,13 +1,5 @@
-import '../enums/fastpix_player_enums.dart';
-import 'fastpix_player_quality_control.dart';
-
 /// Quality configuration for FastPix Player
 class FastPixPlayerQualityConfiguration {
-  /// Available video qualities
-  final List<FastPixVideoQuality> availableQualities;
-
-  /// Initial quality selection
-  final FastPixVideoQuality initialQuality;
 
   /// Whether to allow quality switching
   final bool allowQualitySwitching;
@@ -57,21 +49,10 @@ class FastPixPlayerQualityConfiguration {
   /// Quality selector font weight
   final String? qualitySelectorFontWeight;
 
-  /// Quality control parameters
-  final FastPixPlayerQualityControl? qualityControl;
-
   /// Whether to show quality control options
   final bool showQualityControlOptions;
 
   const FastPixPlayerQualityConfiguration({
-    this.availableQualities = const [
-      FastPixVideoQuality.auto,
-      FastPixVideoQuality.low,
-      FastPixVideoQuality.medium,
-      FastPixVideoQuality.high,
-      FastPixVideoQuality.ultra,
-    ],
-    this.initialQuality = FastPixVideoQuality.auto,
     this.allowQualitySwitching = true,
     this.autoSwitchQuality = true,
     this.showQualitySelector = true,
@@ -88,14 +69,11 @@ class FastPixPlayerQualityConfiguration {
     this.qualitySelectorHeight,
     this.qualitySelectorFontSize,
     this.qualitySelectorFontWeight,
-    this.qualityControl,
     this.showQualityControlOptions = true,
   });
 
   /// Create a copy with updated values
   FastPixPlayerQualityConfiguration copyWith({
-    List<FastPixVideoQuality>? availableQualities,
-    FastPixVideoQuality? initialQuality,
     bool? allowQualitySwitching,
     bool? autoSwitchQuality,
     bool? showQualitySelector,
@@ -112,12 +90,9 @@ class FastPixPlayerQualityConfiguration {
     double? qualitySelectorHeight,
     double? qualitySelectorFontSize,
     String? qualitySelectorFontWeight,
-    FastPixPlayerQualityControl? qualityControl,
     bool? showQualityControlOptions,
   }) {
     return FastPixPlayerQualityConfiguration(
-      availableQualities: availableQualities ?? this.availableQualities,
-      initialQuality: initialQuality ?? this.initialQuality,
       allowQualitySwitching:
           allowQualitySwitching ?? this.allowQualitySwitching,
       autoSwitchQuality: autoSwitchQuality ?? this.autoSwitchQuality,
@@ -147,7 +122,6 @@ class FastPixPlayerQualityConfiguration {
           qualitySelectorFontSize ?? this.qualitySelectorFontSize,
       qualitySelectorFontWeight:
           qualitySelectorFontWeight ?? this.qualitySelectorFontWeight,
-      qualityControl: qualityControl ?? this.qualityControl,
       showQualityControlOptions:
           showQualityControlOptions ?? this.showQualityControlOptions,
     );

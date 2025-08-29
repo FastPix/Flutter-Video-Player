@@ -1,11 +1,13 @@
 import 'dart:ui';
 
-import '../enums/fastpix_player_enums.dart';
+import 'package:fastpix_video_player/src/enums/fastpix_controls_visibility.dart';
 
 /// Controls configuration for FastPix Player
 class FastPixPlayerControlsConfiguration {
   /// Whether to show controls
   final bool showControls;
+
+  final bool autoPlay;
 
   /// Controls visibility behavior
   final FastPixControlsVisibility controlsVisibility;
@@ -28,6 +30,10 @@ class FastPixPlayerControlsConfiguration {
   /// Whether to show subtitle selector
   final bool showSubtitleSelector;
 
+  final bool enableSkips;
+
+  final bool enableRetry;
+
   /// Whether to show volume slider
   final bool showVolumeSlider;
 
@@ -39,21 +45,6 @@ class FastPixPlayerControlsConfiguration {
 
   /// Controls show duration on tap
   final Duration controlsShowDuration;
-
-  /// Whether to enable double tap to seek
-  final bool enableDoubleTapToSeek;
-
-  /// Double tap seek duration
-  final Duration doubleTapSeekDuration;
-
-  /// Whether to enable swipe to seek
-  final bool enableSwipeToSeek;
-
-  /// Whether to enable swipe to change volume
-  final bool enableSwipeToChangeVolume;
-
-  /// Whether to enable swipe to change brightness
-  final bool enableSwipeToChangeBrightness;
 
   /// Controls background color
   final Color? controlsBackgroundColor;
@@ -74,6 +65,7 @@ class FastPixPlayerControlsConfiguration {
     this.showControls = true,
     this.controlsVisibility = FastPixControlsVisibility.onTap,
     this.showPlayPauseButton = true,
+    this.enableSkips = false,
     this.showProgressBar = true,
     this.showTimeIndicator = true,
     this.showFullscreenButton = true,
@@ -81,13 +73,10 @@ class FastPixPlayerControlsConfiguration {
     this.showSubtitleSelector = true,
     this.showVolumeSlider = true,
     this.showSeekBar = true,
+    this.autoPlay = false,
+    this.enableRetry = false,
     this.controlsAutoHideDuration = const Duration(seconds: 3),
     this.controlsShowDuration = const Duration(seconds: 3),
-    this.enableDoubleTapToSeek = true,
-    this.doubleTapSeekDuration = const Duration(seconds: 10),
-    this.enableSwipeToSeek = true,
-    this.enableSwipeToChangeVolume = true,
-    this.enableSwipeToChangeBrightness = true,
     this.controlsBackgroundColor,
     this.controlsForegroundColor,
     this.progressBarColor,
@@ -119,12 +108,16 @@ class FastPixPlayerControlsConfiguration {
     String? progressBarColor,
     String? progressBarPlayedColor,
     String? progressBarBufferedColor,
+    bool? autoPlay,
+    bool? enableSkips,
+    bool? enableRetry
   }) {
     return FastPixPlayerControlsConfiguration(
       showControls: showControls ?? this.showControls,
       controlsVisibility: controlsVisibility ?? this.controlsVisibility,
       showPlayPauseButton: showPlayPauseButton ?? this.showPlayPauseButton,
       showProgressBar: showProgressBar ?? this.showProgressBar,
+      enableSkips: enableSkips ?? this.enableSkips,
       showTimeIndicator: showTimeIndicator ?? this.showTimeIndicator,
       showFullscreenButton: showFullscreenButton ?? this.showFullscreenButton,
       showQualitySelector: showQualitySelector ?? this.showQualitySelector,
@@ -134,15 +127,6 @@ class FastPixPlayerControlsConfiguration {
       controlsAutoHideDuration:
           controlsAutoHideDuration ?? this.controlsAutoHideDuration,
       controlsShowDuration: controlsShowDuration ?? this.controlsShowDuration,
-      enableDoubleTapToSeek:
-          enableDoubleTapToSeek ?? this.enableDoubleTapToSeek,
-      doubleTapSeekDuration:
-          doubleTapSeekDuration ?? this.doubleTapSeekDuration,
-      enableSwipeToSeek: enableSwipeToSeek ?? this.enableSwipeToSeek,
-      enableSwipeToChangeVolume:
-          enableSwipeToChangeVolume ?? this.enableSwipeToChangeVolume,
-      enableSwipeToChangeBrightness:
-          enableSwipeToChangeBrightness ?? this.enableSwipeToChangeBrightness,
       controlsBackgroundColor:
           controlsBackgroundColor ?? this.controlsBackgroundColor,
       controlsForegroundColor:
@@ -150,8 +134,10 @@ class FastPixPlayerControlsConfiguration {
       progressBarColor: progressBarColor ?? this.progressBarColor,
       progressBarPlayedColor:
           progressBarPlayedColor ?? this.progressBarPlayedColor,
+      autoPlay: autoPlay ?? this.autoPlay,
       progressBarBufferedColor:
           progressBarBufferedColor ?? this.progressBarBufferedColor,
+      enableRetry: enableRetry ?? this.enableRetry
     );
   }
 }

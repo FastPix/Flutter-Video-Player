@@ -1,6 +1,6 @@
 name: fastpix_video_player
 description: "A high-performance video player for Flutter with advanced features and customizable UI."
-version: 0.1.0
+version: 0.2.0
 homepage: https://github.com/FastPix/Flutter-Video-Player
 repository: https://github.com/FastPix/Flutter-Video-Player
 issue_tracker: https://github.com/FastPix/Flutter-Video-Player/issues

@@ -41,7 +41,7 @@ Or
 Add the dependency in your `pubspec.yaml`:
 ```yaml
 dependencies:
-  fastpix_video_player: 2.0.0
+  fastpix_video_player: 1.0.0
 ```
 
 ### Basic Usage Example

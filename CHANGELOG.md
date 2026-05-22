@@ -1,6 +1,6 @@
 # Changelog
 
-## [2.0.0]
+## [1.0.0]
 
 ### Changed
 - **BREAKING**: Updated default streaming base URL from `https://stream.fastpix.io` to `https://stream.fastpix.com`

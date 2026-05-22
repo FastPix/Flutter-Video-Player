@@ -28,8 +28,8 @@ This SDK simplifies HLS video playback by offering a wide range of customization
 
 ## Getting started with FastPix Flutter Player:
 To get started with the FastPix Player SDK we need some prerequisites, follow these steps:
-1. **Log in to the FastPix Dashboard**: Navigate to the [FastPix-Dashboard](https://dashboard.fastpix.io) and log in with your credentials.
-2. **Create Media**: Start by creating a media using a pull or push method. You can also use our APIs instead for [Push media](https://docs.fastpix.io/docs/upload-videos-directly) or [Pull media](https://docs.fastpix.io/docs/upload-videos-from-url).
+1. **Log in to the FastPix Dashboard**: Navigate to the [FastPix-Dashboard](https://dashboard.fastpix.com) and log in with your credentials.
+2. **Create Media**: Start by creating a media using a pull or push method. You can also use our APIs instead for [Push media](https://docs.fastpix.com/docs/upload-videos-directly) or [Pull media](https://docs.fastpix.com/docs/upload-videos-from-url).
 3. **Retrieve Media Details**: After creation, access the media details by navigating to the "View Media" page.
 4. **Get Playback ID**: From the media details, obtain the playback ID.
 5. **Play Video**: Use the playback ID in the FastPix-player to play the video seamlessly.
@@ -41,7 +41,7 @@ Or
 Add the dependency in your `pubspec.yaml`:
 ```yaml
 dependencies:
-  fastpix_player: 0.1.0
+  fastpix_video_player: 2.0.0
 ```
 
 ### Basic Usage Example
@@ -89,7 +89,7 @@ class _FastPixPlayerDemoState extends State<FastPixPlayerDemo> {
     final dataSource = FastPixPlayerDataSource.hls(
       playbackId: 'your-playback-id-here',
       title: 'Sample HLS Stream',
-      description: 'A sample HLS stream from staging.metrix.io',
+      description: 'A sample HLS stream from staging.metrix.com',
       thumbnailUrl: 'https://www.example.com/thumbnail.jpg',
     );
 
@@ -288,7 +288,7 @@ The main data source class that handles streaming configuration:
 #### Optional Parameters
 - `title`: Optional title for the stream
 - `description`: Optional description
-- `customDomain`: Custom streaming domain (defaults to staging.metrix.io)
+- `customDomain`: Custom streaming domain (defaults to staging.metrix.com)
 - `token`: Authentication token for protected streams
 - `streamType`: Set to `StreamType.onDomand | StreamType.live` for live streams
 - `headers`: Optional HTTP headers for authentication
@@ -344,7 +344,7 @@ Basic player widget with minimal controls.
 
 ## Additional Information
 
-FastPix Player is designed specifically for streaming content from staging.metrix.io and other streaming services. It automatically constructs the correct streaming URLs based on your playback ID, custom domain, and chosen format, ensuring optimal performance and compatibility.
+FastPix Player is designed specifically for streaming content from staging.metrix.com and other streaming services. It automatically constructs the correct streaming URLs based on your playback ID, custom domain, and chosen format, ensuring optimal performance and compatibility.
 
 The controller-based API ensures predictable behavior by centralizing all data source and configuration management through the controller, eliminating the random behavior that could occur with duplicate parameter passing.
 

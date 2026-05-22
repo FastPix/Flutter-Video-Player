@@ -78,7 +78,7 @@ class FastPixPlayerDataSource {
   final Duration? endAt;
 
   /// Base URL for the streaming service
-  static const String _baseUrl = 'https://stream.fastpix.io';
+  static const String _baseUrl = 'https://stream.fastpix.com';
 
   const FastPixPlayerDataSource({
     required this.playbackId,

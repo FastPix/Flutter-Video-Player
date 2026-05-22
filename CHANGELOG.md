@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.0]
+
+### Changed
+- **BREAKING**: Updated default streaming base URL from `https://stream.fastpix.io` to `https://stream.fastpix.com`
+- Updated FastPix Dashboard, documentation, and streaming domain references from `.io` to `.com` across README and issue templates
+
 ## [0.2.0]
 
 ### Added

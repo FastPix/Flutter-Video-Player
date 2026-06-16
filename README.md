@@ -29,7 +29,7 @@ This SDK simplifies HLS video playback by offering a wide range of customization
 ## Getting started with FastPix Flutter Player:
 To get started with the FastPix Player SDK we need some prerequisites, follow these steps:
 1. **Log in to the FastPix Dashboard**: Navigate to the [FastPix-Dashboard](https://dashboard.fastpix.com) and log in with your credentials.
-2. **Create Media**: Start by creating a media using a pull or push method. You can also use our APIs instead for [Push media](https://docs.fastpix.com/docs/upload-videos-directly) or [Pull media](https://docs.fastpix.com/docs/upload-videos-from-url).
+2. **Create Media**: Start by creating a media using a pull or push method. You can also use our APIs instead for [Push media](https://fastpix.com/docs/upload-videos/upload-videos-from-device) or [Pull media](https://fastpix.com/docs/upload-videos/upload-videos-from-a-url).
 3. **Retrieve Media Details**: After creation, access the media details by navigating to the "View Media" page.
 4. **Get Playback ID**: From the media details, obtain the playback ID.
 5. **Play Video**: Use the playback ID in the FastPix-player to play the video seamlessly.

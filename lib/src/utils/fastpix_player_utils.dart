@@ -2,6 +2,9 @@ import 'dart:io';
 
 /// Utility functions for FastPix Player
 class FastPixPlayerUtils {
+  /// `Cache-Control`/`Pragma` directive used to keep manifests uncached.
+  static const String _noCache = 'no-cache';
+
   /// Check if the current platform is iOS
   static bool get isIOS => Platform.isIOS;
 
@@ -22,7 +25,7 @@ class FastPixPlayerUtils {
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
         'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': _noCache,
       };
     } else if (isAndroid) {
       return _androidHeaders ??= {
@@ -93,8 +96,8 @@ class FastPixPlayerUtils {
       'Accept':
           'application/vnd.apple.mpegurl, application/x-mpegURL, text/plain, */*',
       'Accept-Encoding': 'identity', // Prevent compression issues
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache',
+      'Cache-Control': _noCache,
+      'Pragma': _noCache,
       'User-Agent': 'BetterPlayerPlus/1.0',
       'Connection': 'keep-alive',
     };

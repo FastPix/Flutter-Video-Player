@@ -13,6 +13,11 @@ This SDK simplifies HLS video playback by offering a wide range of customization
     - the `token` attribute is required to play private or DRM protected streams
     - **Note:** You can skip the token for public streams.
 
+- ## DRM playback:
+    - Protected media plays through the FastPix license server using `drmConfiguration`, with Widevine on Android and FairPlay on iOS.
+    - License and certificate URLs are derived from the playback ID, so only the DRM token has to be supplied.
+    - DRM failures are normalized into stable error codes with actionable messages, so callers can refresh a token, retry, or fall back without parsing platform error strings.
+
 - ## Inbuilt error handling:
     - The player includes inbuilt error handling that displays appropriate error messages, helping developers quickly understand and address any issues that arise during playback.
 
@@ -41,7 +46,7 @@ Or
 Add the dependency in your `pubspec.yaml`:
 ```yaml
 dependencies:
-  fastpix_video_player: 1.0.0
+  fastpix_video_player: 1.0.1
 ```
 
 ### Basic Usage Example
@@ -224,6 +229,103 @@ final liveConfiguration = FastPixPlayerConfiguration(
 );
 ```
 
+### DRM Protected Media
+
+FastPix serves DRM protected media as HLS with CBCS encryption. Playback requires two JWTs: the playback `token` on the data source and the `drmToken` used to authorize the license request. When the token is generated with the **DRM License** feature enabled, the same value can be used for both.
+
+License and certificate URLs are derived from the playback ID, so only the DRM token has to be supplied.
+
+```dart
+final drmDataSource = FastPixPlayerDataSource.hls(
+  playbackId: 'your-playback-id',
+  token: 'jwt-token', // Required: DRM protected media is always private
+  drmConfiguration: FastPixPlayerDrmConfiguration(
+    drmToken: 'drm-jwt-token', // JWT authorizing the license request
+  ),
+);
+```
+
+`drmType` defaults to Widevine on Android and FairPlay on iOS. Pass it explicitly to override it, and use `headers` to add headers to the license request:
+
+```dart
+FastPixPlayerDrmConfiguration(
+  drmToken: 'drm-jwt-token',
+  drmType: FastPixDrmType.widevine, // widevine (Android) | fairplay (iOS)
+  headers: {'X-Custom-Header': 'value'},
+);
+```
+
+Local caching is disabled automatically for DRM sources, since encrypted segments must never be cached.
+
+> **iOS note:** `better_player_plus` routes FairPlay through an EZDRM specific resource loader that rewrites the license URL, so FastPix FairPlay playback does not currently work on iOS without patching the plugin. Widevine playback on Android is fully supported.
+
+#### DRM Error Handling
+
+An unusable DRM setup is rejected before playback starts: `initialize` throws a `FastPixDrmException` and also emits a `FastPixPlayerDrmErrorEvent`, so a bad configuration surfaces immediately instead of as an endless spinner. Failures that happen during playback are classified from the platform error into the same set of codes.
+
+```dart
+try {
+  await controller.initialize(
+    dataSource: drmDataSource,
+    configuration: configuration,
+  );
+} on FastPixDrmException catch (error) {
+  debugPrint('${error.code}: ${error.message}');
+  if (error.isTokenRelated) {
+    // Re-issue the DRM token and retry
+  } else if (error.isRetryable) {
+    // A plain retry may succeed
+  }
+}
+
+// DRM failures are also delivered to `error` listeners
+controller.addEventListener(FastPixPlayerEventTypes.error, (event) {
+  if (event is FastPixPlayerDrmErrorEvent) {
+    debugPrint('${event.code} ${event.message}');
+  }
+});
+```
+
+The most recent DRM failure stays available on the controller as `controller.lastDrmError`, and any playback failure as `controller.lastError`.
+
+##### DRM Error Codes
+
+| Code | Meaning |
+| --- | --- |
+| `FP_DRM_CONFIGURATION_MISSING` | The media is DRM protected but playback was configured without `drmConfiguration` |
+| `FP_DRM_MISSING_DRM_TOKEN` | `drmConfiguration.drmToken` is empty |
+| `FP_DRM_MISSING_PLAYBACK_TOKEN` | The playback `token` on the data source is empty |
+| `FP_DRM_UNSUPPORTED_PLATFORM` | Widevine requested on iOS, or FairPlay on Android |
+| `FP_DRM_LICENSE_UNAUTHORIZED` | The license server rejected the request — expired or invalid DRM token |
+| `FP_DRM_LICENSE_REQUEST_FAILED` | The license request failed (network, 5xx, timeout) |
+| `FP_DRM_CERTIFICATE_REQUEST_FAILED` | The FairPlay application certificate could not be fetched |
+| `FP_DRM_PROVISIONING_FAILED` | The device could not be provisioned with the DRM provider |
+| `FP_DRM_DEVICE_NOT_SUPPORTED` | No secure decoder, revoked device, or unsupported DRM scheme |
+| `FP_DRM_UNKNOWN` | A DRM failure that could not be classified further |
+
+`isTokenRelated` indicates that re-issuing credentials is likely to help; `isRetryable` that a plain retry may succeed.
+
+#### DRM Error UI and Diagnostics
+
+`FastPixPlayer` renders its own failure state and can probe the FastPix manifest, license and certificate endpoints to explain the failure — the platform players report every load failure with the same opaque message, so the probe separates a bad playback ID (manifest 404) from an expired playback token (manifest 403) from a rejected DRM token (license 401/403).
+
+```dart
+FastPixPlayer(
+  controller: controller,
+  diagnoseErrors: true, // Default: probe the endpoints after a failure
+  drmErrorWidgetBuilder: (error) => Text('DRM: ${error.message}'),
+  errorWidgetBuilder: (error) => Text(error.message),
+)
+```
+
+The diagnosis can also be requested directly:
+
+```dart
+final diagnosis = await controller.diagnosePlayback();
+debugPrint(diagnosis?.summary);            // Human readable cause
+debugPrint(diagnosis?.probes.join(' · ')); // Per-endpoint results
+```
+
 ## Custom Domain
 
 ### Public Media
@@ -273,10 +375,16 @@ final liveConfiguration = FastPixPlayerConfiguration(
 The main controller class that manages the player state and configuration:
 
 #### Initialization
-- `initialize(dataSource, configuration)`: Initialize the player with data source and configuration
+- `initialize(dataSource, configuration)`: Initialize the player with data source and configuration. Throws a `FastPixDrmException` when the DRM configuration cannot produce a successful license request
+
+#### DRM
+- `lastDrmError`: Most recent `FastPixDrmException`, or `null` when DRM playback has not failed
+- `lastError`: Most recent playback error of any kind, DRM or not
+- `diagnosePlayback()`: Probe the FastPix manifest, license and certificate endpoints and return a `FastPixPlaybackDiagnosis` explaining the failure
 
 #### Cleanup
 - `dispose()`: Clean up resources
+- `reset()`: Clear player state, including the retained DRM and playback errors
 
 ### FastPixPlayerDataSource
 
@@ -290,12 +398,16 @@ The main data source class that handles streaming configuration:
 - `description`: Optional description
 - `customDomain`: Custom streaming domain (defaults to staging.metrix.com)
 - `token`: Authentication token for protected streams
+- `drmConfiguration`: DRM configuration for protected media. Requires `token` to be set as well
 - `streamType`: Set to `StreamType.onDomand | StreamType.live` for live streams
 - `headers`: Optional HTTP headers for authentication
-- `cacheEnabled`: Enable/disable video caching
+- `cacheEnabled`: Enable/disable video caching (always disabled for DRM sources)
 - `loop`: Enable/disable video looping
 - `qualityControl`: Quality control parameters
 - `showSubtitles`: Whether to show subtitles by default
+
+#### Properties
+- `drmEnabled`: Whether this source is DRM protected
 
 #### Factory Constructors
 - `FastPixPlayerDataSource.hls()`: Create an HLS data source
@@ -303,6 +415,36 @@ The main data source class that handles streaming configuration:
 ### FastPixPlayerConfiguration
 
 Main configuration class for player behavior:
+
+### FastPixPlayerDrmConfiguration
+
+DRM configuration for protected media:
+
+#### Required Parameters
+- `drmToken` (required): JWT authorizing access to the FastPix DRM license server
+
+#### Optional Parameters
+- `drmType`: DRM system to use. Defaults to FairPlay on iOS and Widevine on Android
+- `headers`: Additional headers sent with the license request
+
+#### Members
+- `resolvedDrmType`: DRM system for the current platform, honouring an explicit `drmType`
+- `licenseUrl(playbackId)`: License server URL for the playback ID
+- `certificateUrl(playbackId)`: FairPlay application certificate URL, `null` for DRM systems that do not use one
+- `validate(playbackId, hasPlaybackToken)`: Fail fast with a `FastPixDrmException` when the configuration cannot produce a successful license request
+- `copyWith()`: Create a copy with updated values
+
+### FastPixDrmException
+
+Thrown for DRM configuration and playback failures:
+
+- `errorCode`: Normalized `FastPixDrmErrorCode`
+- `code`: Stable string code, also used as the `code` on emitted error events
+- `message`: Human readable, actionable description
+- `playbackId`: Playback ID the failure relates to, when known
+- `underlyingError`: Raw platform error string, when the failure came from the player
+- `isTokenRelated`: Whether retrying with a freshly issued DRM token is likely to help
+- `isRetryable`: Whether a plain retry may succeed
 
 ### FastPixPlayerQualityControl
 
@@ -320,6 +462,11 @@ Advanced quality control parameters:
 
 #### FastPixPlayer
 Basic player widget with minimal controls.
+
+DRM related properties:
+- `drmErrorWidgetBuilder`: Builder for the DRM failure state. Takes precedence over `errorWidgetBuilder` for DRM failures
+- `errorWidgetBuilder`: Builder for the generic failure state
+- `diagnoseErrors`: Whether to probe the FastPix endpoints after a failure to work out its real cause (default `true`)
 
 #### FastPixAspectRatio
 - `fit`: Fit to screen
@@ -342,6 +489,10 @@ Basic player widget with minimal controls.
 - `p1440`: 1440p resolution
 - `p2160`: 2160p (4K) resolution
 
+#### FastPixDrmType
+- `widevine`: Widevine, used on Android
+- `fairplay`: FairPlay, used on iOS
+
 ## Additional Information
 
 FastPix Player is designed specifically for streaming content from staging.metrix.com and other streaming services. It automatically constructs the correct streaming URLs based on your playback ID, custom domain, and chosen format, ensuring optimal performance and compatibility.
@@ -356,6 +507,7 @@ The controller-based API ensures predictable behavior by centralizing all data s
 - **Caching**: Intelligent video caching
 - **Custom Domains**: Support for custom streaming domains
 - **Authentication**: Token-based authentication
+- **DRM**: Widevine and FairPlay playback through the FastPix license server
 - **Error Handling**: Comprehensive error management
 
 For issues, feature requests, or contributions, please visit the project repository.

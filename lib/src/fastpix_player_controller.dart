@@ -8,6 +8,10 @@ import 'models/valid_events.dart';
 
 /// Controller for FastPix Player
 class FastPixPlayerController implements PlayerObserver {
+  /// Fallback message used when the platform player reports a failure without
+  /// an exception string.
+  static const String _unknownErrorMessage = 'Unknown error';
+
   BetterPlayerController? _betterPlayerController;
   FastPixPlayerDataSource? _dataSource;
   FastPixPlayerConfiguration? _configuration;
@@ -61,14 +65,55 @@ class FastPixPlayerController implements PlayerObserver {
   /// Get the current data source
   FastPixPlayerDataSource? get dataSource => _dataSource;
 
-  late FastPixMetrics _fastPixMetrics;
+  /// Null until [initialize] has built it. It stays null when initialization
+  /// fails early — an invalid DRM setup rejects the source before metrics
+  /// exist — so every use has to tolerate its absence: a controller must be
+  /// disposable whether or not it was ever successfully initialized.
+  FastPixMetrics? _fastPixMetrics;
   ErrorModel? _errorModel;
+  FastPixDrmException? _lastDrmError;
+  FastPixPlayerErrorEvent? _lastError;
+
+  /// Most recent DRM failure, or `null` when DRM playback has not failed.
+  ///
+  /// Cleared by [reset].
+  FastPixDrmException? get lastDrmError => _lastDrmError;
+
+  /// Most recent playback error of any kind, DRM or not.
+  ///
+  /// Retained so a widget that mounts after the failure can still render it.
+  /// Cleared by [reset].
+  FastPixPlayerErrorEvent? get lastError => _lastError;
 
   /// Initialize the controller with data source and configuration
   Future<void> initialize({
     required FastPixPlayerDataSource dataSource,
     FastPixPlayerConfiguration? configuration,
   }) async {
+    // A new source is a new attempt: nothing from the previous one may leak
+    // into it, or a retry with corrected credentials keeps reporting the old
+    // failure.
+    _lastError = null;
+    _lastDrmError = null;
+    _errorModel = null;
+    _lastDispatchedEvent = null;
+    _isEndedCalled = false;
+    _lastEndedAt = null;
+
+    // Fail fast on an unusable DRM setup: the exception carries an actionable
+    // message and is also emitted as an error event so listeners see it.
+    if (dataSource.drmEnabled) {
+      try {
+        dataSource.drmConfiguration!.validate(
+          playbackId: dataSource.playbackId,
+          hasPlaybackToken: dataSource.token?.isNotEmpty == true,
+        );
+      } on FastPixDrmException catch (exception) {
+        _handleDrmException(exception);
+        rethrow;
+      }
+    }
+
     final workspaceId = configuration?.workSpaceId;
     final beaconUrl = configuration?.beaconUrl;
     final viewerId = configuration?.viewerId;
@@ -89,7 +134,7 @@ class FastPixPlayerController implements PlayerObserver {
                   dataSource.url,
                   video?.thumbnailUrl ?? na,
                 ),
-                playerData: PlayerData("fastpix-player", "1.0.0"),
+                playerData: PlayerData("fastpix-player", "1.0.1"),
                 customData:
                     customData
                         ?.map((element) => CustomData(value: element))
@@ -112,6 +157,8 @@ class FastPixPlayerController implements PlayerObserver {
       betterPlayerConfiguration,
       betterPlayerDataSource: betterPlayerDataSource,
     );
+    // A fresh player is live again, so events must be accepted once more.
+    _disposed = false;
     _setupEventListeners();
     _currentState = FastPixPlayerState.ready;
     _eventManager.emit(FastPixPlayerReadyEvent(timestamp: DateTime.now()));
@@ -158,41 +205,252 @@ class FastPixPlayerController implements PlayerObserver {
   bool _isEndedCalled = false;
   DateTime? _lastEndedAt;
 
+  /// Set by [dispose] so an event still in flight cannot reach the platform
+  /// player after it has been torn down.
+  bool _disposed = false;
+
   void _tryDispatch(
     PlayerEvent next,
     Function eventBuilder, {
     BetterPlayerEvent? event,
+    ErrorModel? errorModel,
   }) {
     final allowed = validTransitions[_lastDispatchedEvent] ?? {};
-    if (allowed.contains(next)) {
-      if (_lastDispatchedEvent == PlayerEvent.ended &&
-          next == PlayerEvent.play) {
-        return;
-      }
-      if (next == PlayerEvent.variantChanged) {
-        _handleChangedTrackEvent(event!);
-        return;
-      }
-      if (next == PlayerEvent.error) {
-        _errorModel = ErrorModel(
-          event?.parameters?['exception'] ?? 'Unknown error',
-          event?.parameters?['source'] ?? '503',
-        );
-      }
-      _fastPixMetrics.dispatchEvent(next);
-      _lastDispatchedEvent = next;
-      _eventManager.emit(eventBuilder());
-      if (next == PlayerEvent.playing) {
-        _isEndedCalled = false;
-      }
-    } else {
-      // ignore invalid transitions
+    // Errors must never be swallowed by the transition table: a failure can
+    // arrive in any state (a DRM license rejection typically lands right after
+    // `play` or `buffered`, neither of which lists `error` as a transition).
+    final isAllowed =
+        allowed.contains(next) ||
+        (next == PlayerEvent.error &&
+            _lastDispatchedEvent != PlayerEvent.error);
+    // Invalid transitions are ignored.
+    if (!isAllowed) return;
+
+    if (_lastDispatchedEvent == PlayerEvent.ended && next == PlayerEvent.play) {
+      return;
     }
+    if (next == PlayerEvent.variantChanged) {
+      _handleChangedTrackEvent(event!);
+      return;
+    }
+    if (next == PlayerEvent.error) {
+      // Metrics read the error through getPlayerError() while dispatching,
+      // so it has to be set before dispatchEvent below.
+      _errorModel =
+          errorModel ??
+          ErrorModel(
+            event?.parameters?['exception'] ?? _unknownErrorMessage,
+            event?.parameters?['source'] ?? '503',
+          );
+    }
+    _emitDispatched(next, eventBuilder);
+  }
+
+  /// Beacon the transition to metrics, then emit the built event to listeners.
+  void _emitDispatched(PlayerEvent next, Function eventBuilder) {
+    // A failing metrics beacon must never suppress the player's own events,
+    // least of all the error ones.
+    try {
+      _fastPixMetrics?.dispatchEvent(next);
+    } catch (_) {}
+    _lastDispatchedEvent = next;
+    final emitted = eventBuilder();
+    if (emitted is FastPixPlayerErrorEvent) {
+      // Retained so a widget mounted after the failure can still render it.
+      _lastError = emitted;
+      _currentState = FastPixPlayerState.error;
+    }
+    _eventManager.emit(emitted);
+    if (next == PlayerEvent.playing) {
+      _isEndedCalled = false;
+    }
+  }
+
+  /// Record a DRM failure and emit it to `error` listeners
+  void _handleDrmException(FastPixDrmException exception) {
+    _lastDrmError = exception;
+    _errorModel = ErrorModel(exception.message, exception.code);
+    _currentState = FastPixPlayerState.error;
+    final event = FastPixPlayerDrmErrorEvent.fromException(
+      exception,
+      timestamp: DateTime.now(),
+    );
+    _lastError = event;
+    _eventManager.emit(event);
+  }
+
+  /// Handle a playback exception from the platform player.
+  ///
+  /// On a DRM protected source the raw platform error is classified into a
+  /// [FastPixDrmException] so listeners get an actionable cause instead of an
+  /// opaque `CoreMediaErrorDomain` / `DrmSession` string.
+  void _handlePlaybackException(BetterPlayerEvent event) {
+    final rawError = event.parameters?['exception']?.toString();
+    final drmEnabled = _dataSource?.drmEnabled ?? false;
+
+    if (FastPixDrmErrorClassifier.isDrmError(
+      rawError,
+      drmEnabled: drmEnabled,
+    )) {
+      // A DRM failure on a source with no DRM configuration means the media is
+      // protected and playback was never set up for it.
+      final exception =
+          drmEnabled
+              ? FastPixDrmErrorClassifier.toException(
+                rawError,
+                playbackId: _dataSource?.playbackId,
+              )
+              : FastPixDrmException(
+                FastPixDrmErrorCode.configurationMissing,
+                FastPixDrmErrorClassifier.describe(
+                  FastPixDrmErrorCode.configurationMissing,
+                ),
+                playbackId: _dataSource?.playbackId,
+                underlyingError: rawError,
+              );
+      _lastDrmError = exception;
+      _currentState = FastPixPlayerState.error;
+      _tryDispatch(
+        PlayerEvent.error,
+        event: event,
+        errorModel: ErrorModel(exception.message, exception.code),
+        () => FastPixPlayerDrmErrorEvent.fromException(
+          exception,
+          timestamp: DateTime.now(),
+        ),
+      );
+      return;
+    }
+
+    _tryDispatch(
+      PlayerEvent.error,
+      event: event,
+      () => FastPixPlayerErrorEvent(
+        timestamp: DateTime.now(),
+        message: rawError ?? _unknownErrorMessage,
+        // `better_player_plus` only ever sends an `exception` parameter, so
+        // there is no platform code to report here. The player's own error
+        // text is opaque by design: ExoPlayer collapses a missing playback ID,
+        // an expired token and a rejected DRM license into the same
+        // `Source error`. Call [diagnosePlayback] to recover the real cause.
+        code: null,
+      ),
+    );
+  }
+
+  /// Explain a playback failure by probing the FastPix endpoints directly.
+  ///
+  /// The platform players report every load failure as the same opaque error,
+  /// so this re-requests the manifest and, for DRM sources, the license and
+  /// certificate endpoints, and reports the HTTP status each returns. That
+  /// separates a bad playback ID (manifest 404) from an expired playback token
+  /// (manifest 403) from a rejected DRM token (license 401/403).
+  ///
+  /// Returns `null` when no data source has been set.
+  Future<FastPixPlaybackDiagnosis?> diagnosePlayback() async {
+    final dataSource = _dataSource;
+    if (dataSource == null) return null;
+
+    final drm = dataSource.drmConfiguration;
+    final String manifestUrl;
+    try {
+      manifestUrl = dataSource.url;
+    } on FastPixDrmException {
+      // The configuration is invalid, which is already the diagnosis.
+      return null;
+    }
+
+    return FastPixPlaybackDiagnostics.diagnose(
+      manifestUrl: manifestUrl,
+      licenseUrl: drm?.licenseUrl(dataSource.playbackId),
+      certificateUrl: drm?.certificateUrl(dataSource.playbackId),
+      headers: dataSource.headers,
+      drmConfigured: dataSource.drmEnabled,
+    );
   }
 
   DateTime? _lastSeekAt;
 
+  /// Advance the state machine on a progress tick.
+  ///
+  /// Each check is evaluated against the event dispatched by the preceding
+  /// one, so the order of these blocks is significant.
+  void _handleProgressTick() {
+    updatePlayerDimensions();
+    if (_lastDispatchedEvent == PlayerEvent.buffering) {
+      _tryDispatch(
+        PlayerEvent.buffered,
+        () => FastPixPlayerBufferedEvent(timestamp: DateTime.now()),
+      );
+    }
+    if (_lastDispatchedEvent == PlayerEvent.seeking) {
+      _tryDispatch(
+        PlayerEvent.seeked,
+        () => FastPixPlayerSeekedEvent(timestamp: DateTime.now()),
+      );
+    }
+    if (_lastDispatchedEvent == PlayerEvent.seeked) {
+      _tryDispatch(
+        PlayerEvent.play,
+        () => FastPixPlayerPlayEvent(timestamp: DateTime.now()),
+      );
+    }
+    if (_lastDispatchedEvent == PlayerEvent.play) {
+      _tryDispatch(
+        PlayerEvent.playing,
+        () => FastPixPlayerPlayingEvent(timestamp: DateTime.now()),
+      );
+    }
+  }
+
+  /// Emit the end-of-playback pair, ignoring the duplicate `finished` events
+  /// the platform players deliver within two seconds of each other.
+  void _handleFinished() {
+    final now = DateTime.now();
+    if (_lastEndedAt != null && now.difference(_lastEndedAt!).inSeconds < 2) {
+      return;
+    }
+    _lastEndedAt = now;
+    if (!_isEndedCalled) {
+      _isEndedCalled = true;
+      _lastEndedAt = now;
+      _tryDispatch(
+        PlayerEvent.pause,
+        () => FastPixPlayerPauseEvent(timestamp: DateTime.now()),
+      );
+      _tryDispatch(
+        PlayerEvent.ended,
+        () => FastPixPlayerFinishedEvent(timestamp: DateTime.now()),
+      );
+    }
+  }
+
+  /// Close out whatever was in flight before the seek, then report the seek.
+  void _handleSeekTo() {
+    if (_lastDispatchedEvent == PlayerEvent.seeking) {
+      _tryDispatch(
+        PlayerEvent.seeked,
+        () => FastPixPlayerSeekedEvent(timestamp: DateTime.now()),
+      );
+    }
+    if (_lastDispatchedEvent == PlayerEvent.buffering) {
+      _tryDispatch(
+        PlayerEvent.buffered,
+        () => FastPixPlayerBufferedEvent(timestamp: DateTime.now()),
+      );
+    }
+    _tryDispatch(
+      PlayerEvent.pause,
+      () => FastPixPlayerPauseEvent(timestamp: DateTime.now()),
+    );
+    _tryDispatch(
+      PlayerEvent.seeking,
+      () => FastPixPlayerSeekingEvent(timestamp: DateTime.now()),
+    );
+  }
+
   void _oniOSPlayerEvent(BetterPlayerEvent event) {
+    if (_disposed) return;
     switch (event.betterPlayerEventType) {
       case BetterPlayerEventType.play:
         _tryDispatch(
@@ -202,52 +460,11 @@ class FastPixPlayerController implements PlayerObserver {
         break;
 
       case BetterPlayerEventType.progress:
-        updatePlayerDimensions();
-        if (_lastDispatchedEvent == PlayerEvent.buffering) {
-          _tryDispatch(
-            PlayerEvent.buffered,
-            () => FastPixPlayerBufferedEvent(timestamp: DateTime.now()),
-          );
-        }
-        if (_lastDispatchedEvent == PlayerEvent.seeking) {
-          _tryDispatch(
-            PlayerEvent.seeked,
-            () => FastPixPlayerSeekedEvent(timestamp: DateTime.now()),
-          );
-        }
-        if (_lastDispatchedEvent == PlayerEvent.seeked) {
-          _tryDispatch(
-            PlayerEvent.play,
-            () => FastPixPlayerPlayEvent(timestamp: DateTime.now()),
-          );
-        }
-        if (_lastDispatchedEvent == PlayerEvent.play) {
-          _tryDispatch(
-            PlayerEvent.playing,
-            () => FastPixPlayerPlayingEvent(timestamp: DateTime.now()),
-          );
-        }
+        _handleProgressTick();
         break;
 
       case BetterPlayerEventType.finished:
-        final now = DateTime.now();
-        if (_lastEndedAt != null &&
-            now.difference(_lastEndedAt!).inSeconds < 2) {
-          return;
-        }
-        _lastEndedAt = now;
-        if (!_isEndedCalled) {
-          _isEndedCalled = true;
-          _lastEndedAt = now;
-          _tryDispatch(
-            PlayerEvent.pause,
-            () => FastPixPlayerPauseEvent(timestamp: DateTime.now()),
-          );
-          _tryDispatch(
-            PlayerEvent.ended,
-            () => FastPixPlayerFinishedEvent(timestamp: DateTime.now()),
-          );
-        }
+        _handleFinished();
         break;
 
       case BetterPlayerEventType.changedTrack:
@@ -288,38 +505,11 @@ class FastPixPlayerController implements PlayerObserver {
           return;
         }
         _lastSeekAt = now;
-        if (_lastDispatchedEvent == PlayerEvent.seeking) {
-          _tryDispatch(
-            PlayerEvent.seeked,
-            () => FastPixPlayerSeekedEvent(timestamp: DateTime.now()),
-          );
-        }
-        if (_lastDispatchedEvent == PlayerEvent.buffering) {
-          _tryDispatch(
-            PlayerEvent.buffered,
-            () => FastPixPlayerBufferedEvent(timestamp: DateTime.now()),
-          );
-        }
-        _tryDispatch(
-          PlayerEvent.pause,
-          () => FastPixPlayerPauseEvent(timestamp: DateTime.now()),
-        );
-        _tryDispatch(
-          PlayerEvent.seeking,
-          () => FastPixPlayerSeekingEvent(timestamp: DateTime.now()),
-        );
+        _handleSeekTo();
         break;
 
       case BetterPlayerEventType.exception:
-        _tryDispatch(
-          PlayerEvent.error,
-          event: event,
-          () => FastPixPlayerErrorEvent(
-            timestamp: DateTime.now(),
-            message: event.parameters?['exception'] ?? 'Unknown error',
-            code: event.parameters?['source'] ?? '503',
-          ),
-        );
+        _handlePlaybackException(event);
         break;
 
       default:
@@ -328,6 +518,7 @@ class FastPixPlayerController implements PlayerObserver {
   }
 
   void _onPlayerEvent(BetterPlayerEvent event) {
+    if (_disposed) return;
     switch (event.betterPlayerEventType) {
       case BetterPlayerEventType.play:
         _tryDispatch(
@@ -337,52 +528,11 @@ class FastPixPlayerController implements PlayerObserver {
         break;
 
       case BetterPlayerEventType.progress:
-        updatePlayerDimensions();
-        if (_lastDispatchedEvent == PlayerEvent.buffering) {
-          _tryDispatch(
-            PlayerEvent.buffered,
-            () => FastPixPlayerBufferedEvent(timestamp: DateTime.now()),
-          );
-        }
-        if (_lastDispatchedEvent == PlayerEvent.seeking) {
-          _tryDispatch(
-            PlayerEvent.seeked,
-            () => FastPixPlayerSeekedEvent(timestamp: DateTime.now()),
-          );
-        }
-        if (_lastDispatchedEvent == PlayerEvent.seeked) {
-          _tryDispatch(
-            PlayerEvent.play,
-            () => FastPixPlayerPlayEvent(timestamp: DateTime.now()),
-          );
-        }
-        if (_lastDispatchedEvent == PlayerEvent.play) {
-          _tryDispatch(
-            PlayerEvent.playing,
-            () => FastPixPlayerPlayingEvent(timestamp: DateTime.now()),
-          );
-        }
+        _handleProgressTick();
         break;
 
       case BetterPlayerEventType.finished:
-        final now = DateTime.now();
-        if (_lastEndedAt != null &&
-            now.difference(_lastEndedAt!).inSeconds < 2) {
-          return;
-        }
-        _lastEndedAt = now;
-        if (!_isEndedCalled) {
-          _isEndedCalled = true;
-          _lastEndedAt = now;
-          _tryDispatch(
-            PlayerEvent.pause,
-            () => FastPixPlayerPauseEvent(timestamp: DateTime.now()),
-          );
-          _tryDispatch(
-            PlayerEvent.ended,
-            () => FastPixPlayerFinishedEvent(timestamp: DateTime.now()),
-          );
-        }
+        _handleFinished();
         break;
 
       case BetterPlayerEventType.changedTrack:
@@ -415,38 +565,11 @@ class FastPixPlayerController implements PlayerObserver {
         break;
 
       case BetterPlayerEventType.seekTo:
-        if (_lastDispatchedEvent == PlayerEvent.seeking) {
-          _tryDispatch(
-            PlayerEvent.seeked,
-            () => FastPixPlayerSeekedEvent(timestamp: DateTime.now()),
-          );
-        }
-        if (_lastDispatchedEvent == PlayerEvent.buffering) {
-          _tryDispatch(
-            PlayerEvent.buffered,
-            () => FastPixPlayerBufferedEvent(timestamp: DateTime.now()),
-          );
-        }
-        _tryDispatch(
-          PlayerEvent.pause,
-          () => FastPixPlayerPauseEvent(timestamp: DateTime.now()),
-        );
-        _tryDispatch(
-          PlayerEvent.seeking,
-          () => FastPixPlayerSeekingEvent(timestamp: DateTime.now()),
-        );
+        _handleSeekTo();
         break;
 
       case BetterPlayerEventType.exception:
-        _tryDispatch(
-          PlayerEvent.error,
-          event: event,
-          () => FastPixPlayerErrorEvent(
-            timestamp: DateTime.now(),
-            message: event.parameters?['exception'] ?? 'Unknown error',
-            code: event.parameters?['source'] ?? '503',
-          ),
-        );
+        _handlePlaybackException(event);
         break;
 
       default:
@@ -598,10 +721,15 @@ class FastPixPlayerController implements PlayerObserver {
 
   /// Dispose the controller
   Future<void> dispose() async {
-    _betterPlayerController?.dispose();
-    _betterPlayerController = null;
+    // The listeners have to come off before the player goes away. Removing
+    // them after the field is nulled is a no-op, so they stayed attached and
+    // kept delivering events into a disposed BetterPlayerController — which
+    // surfaces as "A VideoPlayerController was used after being disposed".
+    _disposed = true;
     _betterPlayerController?.removeEventsListener(_onPlayerEvent);
     _betterPlayerController?.removeEventsListener(_oniOSPlayerEvent);
+    _betterPlayerController?.dispose();
+    _betterPlayerController = null;
 
     final previousState = _currentState;
     _currentState = FastPixPlayerState.initialized;
@@ -615,7 +743,17 @@ class FastPixPlayerController implements PlayerObserver {
       ),
     );
 
-    await _fastPixMetrics.dispose(true);
+    // Tearing down metrics must not be able to fail the teardown itself. A
+    // controller whose `initialize` was rejected — an invalid DRM setup, say —
+    // has no metrics session at all, and a beacon flush can throw on its way
+    // out. Either one escaping here aborts the caller mid-teardown, which
+    // strands the next playback attempt: the caller never gets to build its
+    // replacement controller.
+    final metrics = _fastPixMetrics;
+    _fastPixMetrics = null;
+    try {
+      await metrics?.dispose(true);
+    } catch (_) {}
   }
 
   /// Reset the controller state for reinitialization
@@ -623,6 +761,8 @@ class FastPixPlayerController implements PlayerObserver {
     _currentState = FastPixPlayerState.initialized;
     _lastDispatchedEvent = null;
     _errorModel = null;
+    _lastDrmError = null;
+    _lastError = null;
 
     // Emit reset event
     _eventManager.emit(
@@ -775,7 +915,7 @@ class FastPixPlayerController implements PlayerObserver {
     attributes['codecs'] = codec.toString();
     attributes['mimeType'] = mimeType.toString();
 
-    _fastPixMetrics.dispatchEvent(
+    _fastPixMetrics?.dispatchEvent(
       PlayerEvent.variantChanged,
       attributes: attributes,
     );

@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import 'fastpix_player_drm_error.dart';
+
 /// Base class for all FastPix player events
 abstract class FastPixPlayerEvent {
   /// Event type identifier
@@ -84,6 +86,58 @@ class FastPixPlayerErrorEvent extends FastPixPlayerEvent {
     this.code,
     super.data,
   }) : super(type: 'error');
+}
+
+/// DRM error event - fired when playback of DRM protected media fails.
+///
+/// Dispatched to `error` listeners like any other error, with the DRM specific
+/// cause attached so callers can react (refresh the DRM token, fall back to an
+/// unprotected stream, show a device-not-supported message).
+class FastPixPlayerDrmErrorEvent extends FastPixPlayerErrorEvent {
+  /// Normalised DRM failure cause
+  final FastPixDrmErrorCode drmErrorCode;
+
+  /// Playback ID the failure relates to, when known
+  final String? playbackId;
+
+  /// Raw platform error, when the failure came from the player
+  final String? underlyingError;
+
+  FastPixPlayerDrmErrorEvent({
+    required super.timestamp,
+    required super.message,
+    required FastPixDrmErrorCode drmErrorCode,
+    this.playbackId,
+    this.underlyingError,
+    super.data,
+  }) : drmErrorCode = drmErrorCode,
+       super(code: drmErrorCode.code);
+
+  /// Build an event from a [FastPixDrmException]
+  factory FastPixPlayerDrmErrorEvent.fromException(
+    FastPixDrmException exception, {
+    required DateTime timestamp,
+  }) {
+    return FastPixPlayerDrmErrorEvent(
+      timestamp: timestamp,
+      message: exception.message,
+      drmErrorCode: exception.errorCode,
+      playbackId: exception.playbackId,
+      underlyingError: exception.underlyingError,
+      data: exception.toMap(),
+    );
+  }
+
+  /// Whether retrying with a freshly issued DRM token is likely to help
+  bool get isTokenRelated => drmErrorCode.isTokenRelated;
+
+  /// Whether a plain retry may succeed
+  bool get isRetryable => drmErrorCode.isRetryable;
+
+  @override
+  String toString() =>
+      'FastPixPlayerDrmErrorEvent(code: $code, message: $message, '
+      'playbackId: $playbackId)';
 }
 
 /// Quality changed event - fired when video quality changes

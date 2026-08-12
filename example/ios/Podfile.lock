@@ -1,0 +1,54 @@
+PODS:
+  - better_player_plus (1.1.2):
+    - Cache (~> 6.0.0)
+    - Flutter
+    - GCDWebServer
+    - HLSCachingReverseProxyServer
+    - PINCache
+  - Cache (6.0.0)
+  - Flutter (1.0.0)
+  - GCDWebServer (3.5.4):
+    - GCDWebServer/Core (= 3.5.4)
+  - GCDWebServer/Core (3.5.4)
+  - HLSCachingReverseProxyServer (0.1.0):
+    - GCDWebServer (~> 3.5)
+    - PINCache (>= 3.0.1-beta.3)
+  - PINCache (3.0.4):
+    - PINCache/Arc-exception-safe (= 3.0.4)
+    - PINCache/Core (= 3.0.4)
+  - PINCache/Arc-exception-safe (3.0.4):
+    - PINCache/Core
+  - PINCache/Core (3.0.4):
+    - PINOperation (~> 1.2.3)
+  - PINOperation (1.2.3)
+
+DEPENDENCIES:
+  - better_player_plus (from `.symlinks/plugins/better_player_plus/ios`)
+  - Flutter (from `Flutter`)
+
+SPEC REPOS:
+  trunk:
+    - Cache
+    - GCDWebServer
+    - HLSCachingReverseProxyServer
+    - PINCache
+    - PINOperation
+
+EXTERNAL SOURCES:
+  better_player_plus:
+    :path: ".symlinks/plugins/better_player_plus/ios"
+  Flutter:
+    :path: Flutter
+
+SPEC CHECKSUMS:
+  better_player_plus: 3d40145c650bb83dde08f0d593b21a144196769f
+  Cache: 4ca7e00363fca5455f26534e5607634c820ffc2d
+  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  GCDWebServer: 2c156a56c8226e2d5c0c3f208a3621ccffbe3ce4
+  HLSCachingReverseProxyServer: 59935e1e0244ad7f3375d75b5ef46e8eb26ab181
+  PINCache: d9a87a0ff397acffe9e2f0db972ac14680441158
+  PINOperation: fb563bcc9c32c26d6c78aaff967d405aa2ee74a7
+
+PODFILE CHECKSUM: 3c63482e143d1b91d2d2560aee9fb04ecc74ac7e
+
+COCOAPODS: 1.16.2

@@ -212,7 +212,7 @@ final liveConfiguration = FastPixPlayerConfiguration(
 ```
 
 ### Private Media
-For private media, token is required.
+For private media, token is required. See [Generate JWTs for secure media](https://fastpix.com/docs/video-security/generate-jwts-for-secure-media) for how to create a signing key and generate the playback token, and [Secure video playback](https://fastpix.com/docs/web-player/secure-video-playback) for how the token is passed and validated.
 
 ```dart
 final liveDataSource = FastPixPlayerDataSource.hls(
@@ -234,6 +234,8 @@ final liveConfiguration = FastPixPlayerConfiguration(
 FastPix serves DRM protected media as HLS with CBCS encryption. Playback requires two JWTs: the playback `token` on the data source and the `drmToken` used to authorize the license request. When the token is generated with the **DRM License** feature enabled, the same value can be used for both.
 
 License and certificate URLs are derived from the playback ID, so only the DRM token has to be supplied.
+
+Generate both JWTs with the FastPix JWT generator — see [Set up DRM encryption](https://fastpix.com/docs/video-security/set-up-drm-encryption) for enabling DRM on a media, and [How to generate DRM tokens](https://fastpix.com/docs/web-player/play-drm-protected-content#how-to-generate-drm-tokens) for issuing the `token` and `drmToken` (enable the **DRM License** feature to reuse a single token for both).
 
 ```dart
 final drmDataSource = FastPixPlayerDataSource.hls(
@@ -397,7 +399,7 @@ The main data source class that handles streaming configuration:
 - `title`: Optional title for the stream
 - `description`: Optional description
 - `customDomain`: Custom streaming domain (defaults to staging.metrix.com)
-- `token`: Authentication token for protected streams
+- `token`: Authentication token for protected streams ([how to generate](https://fastpix.com/docs/video-security/generate-jwts-for-secure-media))
 - `drmConfiguration`: DRM configuration for protected media. Requires `token` to be set as well
 - `streamType`: Set to `StreamType.onDomand | StreamType.live` for live streams
 - `headers`: Optional HTTP headers for authentication
@@ -421,7 +423,7 @@ Main configuration class for player behavior:
 DRM configuration for protected media:
 
 #### Required Parameters
-- `drmToken` (required): JWT authorizing access to the FastPix DRM license server
+- `drmToken` (required): JWT authorizing access to the FastPix DRM license server ([how to generate](https://fastpix.com/docs/web-player/play-drm-protected-content#how-to-generate-drm-tokens))
 
 #### Optional Parameters
 - `drmType`: DRM system to use. Defaults to FairPlay on iOS and Widevine on Android

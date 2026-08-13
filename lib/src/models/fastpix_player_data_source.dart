@@ -25,7 +25,12 @@ class FastPixPlayerDataSource {
   /// Video title
   final String? title;
 
-  final bool drmEnabled;
+  /// DRM configuration. When set, the stream is played back through the
+  /// FastPix license server. Requires [token] to be set as well.
+  final FastPixPlayerDrmConfiguration? drmConfiguration;
+
+  /// Whether this source is DRM protected
+  bool get drmEnabled => drmConfiguration != null;
 
   /// Video description
   final String? description;
@@ -97,7 +102,7 @@ class FastPixPlayerDataSource {
     this.resolution,
     this.streamType = StreamType.onDemand,
     this.headers,
-    this.drmEnabled = false,
+    this.drmConfiguration,
     this.cacheEnabled = true,
     this.cacheDirectory,
     this.maxCacheSize,
@@ -118,29 +123,51 @@ class FastPixPlayerDataSource {
     }
 
     final hasToken = token?.isNotEmpty == true;
+
+    // DRM protected media is always private: the playback token is required in
+    // addition to the DRM token used for the license request. Validation also
+    // covers the DRM token and the platform/DRM system combination, and throws
+    // a [FastPixDrmException] describing what to fix.
+    drmConfiguration?.validate(
+      playbackId: playbackId,
+      hasPlaybackToken: hasToken,
+    );
     final hasCustomDomain = customDomain?.isNotEmpty == true;
-    final hasQualityControl =
-        minResolution != null ||
-                maxResolution != null ||
-                resolution != null ||
-                renditionOrder != null
-            ? true
-            : false;
 
     // Build base URL
-    String baseUrl;
-    if (hasCustomDomain) {
-      baseUrl = 'https://$customDomain/$playbackId$extension';
-    } else {
-      baseUrl = '$_baseUrl/$playbackId$extension';
+    String baseUrl =
+        hasCustomDomain
+            ? 'https://$customDomain/$playbackId$extension'
+            : '$_baseUrl/$playbackId$extension';
+
+    final queryParams = _buildQueryParameters(hasToken: hasToken);
+
+    // Append query parameters if any exist
+    if (queryParams.isNotEmpty) {
+      final separator = baseUrl.contains('?') ? '&' : '?';
+      baseUrl += '$separator${queryParams.join('&')}';
     }
 
-    // Build query parameters
+    // Debug logging removed for production
+    return baseUrl;
+  }
+
+  /// Build the query string parameters for [url].
+  ///
+  /// A quality parameter is only sent when the caller pinned that dimension to
+  /// something other than `auto`.
+  List<String> _buildQueryParameters({required bool hasToken}) {
     final queryParams = <String>[];
 
     if (hasToken) {
       queryParams.add('token=$token');
     }
+
+    final hasQualityControl =
+        minResolution != null ||
+        maxResolution != null ||
+        resolution != null ||
+        renditionOrder != null;
 
     if (hasQualityControl) {
       if (minResolution != FastPixPlayerVideoQuality.auto) {
@@ -157,14 +184,7 @@ class FastPixPlayerDataSource {
       }
     }
 
-    // Append query parameters if any exist
-    if (queryParams.isNotEmpty) {
-      final separator = baseUrl.contains('?') ? '&' : '?';
-      baseUrl += '$separator${queryParams.join('&')}';
-    }
-
-    // Debug logging removed for production
-    return baseUrl;
+    return queryParams;
   }
 
   /// Convert to BetterPlayerDataSource
@@ -181,11 +201,23 @@ class FastPixPlayerDataSource {
       enhancedHeaders['Cache-Control'] = 'no-cache';
       enhancedHeaders['Pragma'] = 'no-cache';
     }
+    // Encrypted segments must never be cached locally.
+    //
+    // Caching is also unusable for HLS on iOS: better_player serves cached
+    // bytes through an AVAssetResourceLoader, which can stand in for a single
+    // file but not for a playlist that resolves to many segment URLs. With it
+    // enabled AVFoundation rejects an otherwise healthy stream with
+    // CoreMediaErrorDomain -12642, which is why only non-DRM playback failed —
+    // the DRM path already disabled the cache.
+    final isIosHls =
+        FastPixPlayerUtils.isIOS && format == FastPixStreamingFormat.hls;
+    final useCache = cacheEnabled && !drmEnabled && !isIosHls;
+
     return BetterPlayerDataSource(
       BetterPlayerDataSourceType.network,
       url,
       cacheConfiguration: BetterPlayerCacheConfiguration(
-        useCache: cacheEnabled,
+        useCache: useCache,
         maxCacheSize:
             maxCacheSize ?? 100 * 1024 * 1024, // Default 100MB if not specified
         preCacheSize: 10 * 1024 * 1024, // 10MB pre-cache
@@ -193,6 +225,9 @@ class FastPixPlayerDataSource {
       headers: enhancedHeaders,
       videoFormat: BetterPlayerVideoFormat.hls,
       liveStream: streamType == StreamType.live,
+      drmConfiguration: drmConfiguration?.toBetterPlayerDrmConfiguration(
+        playbackId,
+      ),
     );
   }
 
@@ -221,7 +256,7 @@ class FastPixPlayerDataSource {
     Duration? endAt,
     String? token,
     String? customDomain,
-    bool? drmEnabled,
+    FastPixPlayerDrmConfiguration? drmConfiguration,
     VideoDetailsData? videoData,
     List<String>? customData,
   }) {
@@ -249,7 +284,7 @@ class FastPixPlayerDataSource {
       maxResolution: maxResolution ?? this.maxResolution,
       resolution: resolution ?? this.resolution,
       renditionOrder: renditionOrder ?? this.renditionOrder,
-      drmEnabled: drmEnabled ?? this.drmEnabled,
+      drmConfiguration: drmConfiguration ?? this.drmConfiguration,
       customData: customData ?? this.customData,
       videoData: videoData ?? this.videoData,
     );
@@ -279,7 +314,7 @@ class FastPixPlayerDataSource {
     Duration? endAt,
     String? token,
     String? customDomain,
-    bool drmEnabled = false,
+    FastPixPlayerDrmConfiguration? drmConfiguration,
     VideoDetailsData? videoData,
     List<String>? customData,
   }) {
@@ -309,7 +344,7 @@ class FastPixPlayerDataSource {
       videoData: videoData,
       customData: customData,
       customDomain: customDomain,
-      drmEnabled: drmEnabled,
+      drmConfiguration: drmConfiguration,
     );
   }
 }

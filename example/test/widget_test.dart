@@ -1,30 +1,90 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
-import 'package:flutter/material.dart';
+import 'package:fastpix_player_example/main.dart';
+import 'package:fastpix_player_example/src/catalog.dart';
+import 'package:fastpix_player_example/src/models/demo_stream.dart';
+import 'package:fastpix_player_example/src/widgets/stream_form_sheet.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:fastpix_player_example/main.dart';
-
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
+  // The catalog is an app-wide singleton, so each test starts from a clean one.
+  tearDown(() {
+    for (final stream in Catalog.instance.streams) {
+      Catalog.instance.remove(stream);
+    }
+  });
+
+  testWidgets('empty catalog offers a way to add a stream', (tester) async {
     await tester.pumpWidget(const MyApp());
-
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
     await tester.pump();
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    expect(find.text('Your catalog is empty'), findsOneWidget);
+    expect(find.text('Add a stream'), findsOneWidget);
+  });
+
+  testWidgets('a saved stream becomes the hero', (tester) async {
+    Catalog.instance.save(
+      const DemoStream(playbackId: 'abc123', title: 'Rocket Launch'),
+    );
+
+    await tester.pumpWidget(const MyApp());
+    await tester.pump();
+
+    expect(find.text('Your catalog is empty'), findsNothing);
+    expect(find.text('Rocket Launch'), findsWidgets);
+    expect(find.text('Play'), findsOneWidget);
+  });
+
+  testWidgets('the add sheet requires a playback ID', (tester) async {
+    await tester.pumpWidget(const MyApp());
+    await tester.pump();
+
+    await tester.tap(find.text('Add a stream'));
+    await tester.pumpAndSettle();
+
+    // The submit button sits at the end of the sheet's own scroll view, which
+    // has to be named — the home screen behind it is scrollable too.
+    await tester.scrollUntilVisible(
+      find.text('Add to catalog'),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(StreamFormSheet),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await tester.tap(find.text('Add to catalog'));
+    await tester.pump();
+
+    expect(find.text('A playback ID is required'), findsOneWidget);
+    expect(Catalog.instance.isEmpty, isTrue);
+  });
+
+  group('DemoStream', () {
+    test('routes DRM only when it is switched on', () {
+      const withToken = DemoStream(
+        playbackId: 'abc',
+        title: 'Clear stream',
+        drmToken: 'leftover-token',
+      );
+
+      // A leftover token must not turn clear media into a DRM load; that
+      // routes it through Widevine/FairPlay and it never plays.
+      expect(withToken.toDataSource().drmEnabled, isFalse);
+      expect(
+        withToken.copyWith(drmEnabled: true).toDataSource().drmEnabled,
+        isTrue,
+      );
+    });
+
+    test('leaves the host unset when blank, for the package default', () {
+      const stream = DemoStream(
+        playbackId: 'abc',
+        title: 'Default host',
+        streamHost: '',
+      );
+
+      expect(stream.toDataSource().customDomain, isNull);
+    });
   });
 }

@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.2]
+
+### Added
+- **Preloading**: `FastPixPreloadManager` warms upcoming sources so the next tap skips the manifest fetch, license acquisition and decoder setup. Two strategies — `network` warms the connection and manifest, `player` builds a detached player that playback then adopts. Warm depth, per-platform player caps, Cast awareness and a full event stream included
+- **Precaching**: `FastPixPrecacheManager` writes manifest and segment bytes to disk ahead of playback, with byte accounting, request coalescing and its own event stream. Reads back into playback on Android; on iOS it stores but does not yet shorten a later start
+- **Chromecast**: `FastPixCastController` for discovery, session management, remote transport control, receiver volume and subtitle selection, with `startCastingFrom` / `stopCastingTo` moving playback between phone and TV at the position it left off. Cast failures are normalized into `FastPixCastErrorCode`, including the Android 13+ nearby devices permission that otherwise makes discovery find nothing silently
+- **Screen capture protection**: `secureScreen` on `FastPixPlayerDrmConfiguration` applies Android's `FLAG_SECURE` while a DRM source plays. On by default, best effort, and window wide
+
+### Changed
+- **iOS FairPlay setup is now self-contained.** The resource-loader patch ships inside the plugin and installs itself at registration, so the manual edit to the cached engine that iOS DRM used to require is no longer needed. Nothing to do on upgrade — remove the manual patch step from your build if you scripted it
+- **Engine floor raised to `better_player_plus: ^1.2.1`**, from `^1.0.8`. FairPlay relies on the engine's Objective-C surface, which settled in 1.2.1. The old floor allowed older engines to satisfy the constraint, so a project resolving to one could see iOS DRM behave inconsistently. Raising the floor makes the supported engine explicit rather than resolution-dependent. Most projects already resolve to 1.2.1 or later and will see no change
+- Pinned the Material control theme in the iOS player so controls render consistently across platforms
+- Reworked the example app UI, including working subtitles and cast track selection
+
+### Documentation
+- Corrected the stated cause of disabled iOS HLS caching. It is the local cache proxy failing on signed FastPix URLs with `CoreMediaErrorDomain -12642`, not FairPlay holding the asset's single resource-loader delegate. The distinction matters because caching is off for unprotected iOS HLS too
+- Corrected the `FastPixPlayerDrmConfiguration.validate` signature, the reachable set of pre-flight DRM error codes, two Chromecast behaviours around DRM refusal and local resume, and the Android manifest snippet, which was missing `FOREGROUND_SERVICE_MEDIA_PLAYBACK`
+
 ## [1.0.1]
 
 ### Added

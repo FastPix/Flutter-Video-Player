@@ -1,5 +1,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Required permission for media playback in foreground service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!-- Cast discovery. The Cast SDK finds receivers over mDNS on the local
+         network, which needs the Wi-Fi state and multicast permissions. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!-- Android 13 (API 33) and above gate local network device discovery
+         behind a runtime permission. Without it MediaRouter simply reports no
+         Cast routes, with no error of any kind. `neverForLocation` declares
+         that the app does not use it to infer physical location, which avoids
+         the extra location prompt. -->
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
     <application
         android:label="fastpix_player_example"
         android:name="${applicationName}"
@@ -33,6 +49,16 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- Google Cast framework configuration -->
+        <meta-data
+        android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+        android:value="com.felnanuke.google_cast.GoogleCastOptionsProvider" />
+
+        <!-- Media notification service for cast controls -->
+        <service
+        android:name="com.google.android.gms.cast.framework.media.MediaNotificationService"
+        android:exported="false"
+        android:foregroundServiceType="mediaPlayback" />    
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

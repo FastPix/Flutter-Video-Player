@@ -10,11 +10,13 @@ enum FastPixDrmType {
   /// Widevine, used on Android. Fully supported.
   widevine('widevine'),
 
-  /// FairPlay, used on iOS.
+  /// FairPlay, used on iOS. Fully supported.
   ///
-  /// Note: `better_player_plus` routes FairPlay through an EZDRM specific
-  /// resource loader that rewrites the license URL, so FastPix FairPlay
-  /// playback does not currently work on iOS without patching the plugin.
+  /// `better_player_plus` routes FairPlay through an EZDRM specific resource
+  /// loader that corrupts a FastPix licence URL, so this package substitutes
+  /// its own — see `ios/Classes/FastPixFairPlayPatch.m`. That ships inside the
+  /// pod and installs at plugin registration, so nothing has to be patched in
+  /// the pub cache and nothing is required of the host app.
   fairplay('fairplay');
 
   const FastPixDrmType(this.value);
@@ -51,13 +53,39 @@ class FastPixPlayerDrmConfiguration {
   /// Additional headers sent with the license request
   final Map<String, String>? headers;
 
+  /// Whether to block screenshots and screen recording while this source
+  /// plays. Android only; on by default.
+  ///
+  /// DRM encrypts the stream, but that alone does not stop the screen being
+  /// captured. Hardware output protection (Widevine L1) cannot help here
+  /// either: it requires a secure surface, and the video is rendered into a
+  /// Flutter texture, which by design must be readable. `FLAG_SECURE` is
+  /// therefore the only capture protection available.
+  ///
+  /// Note this is **window wide** for as long as playback lasts — Android
+  /// applies it to the Activity, not to one view, so the whole host app is
+  /// unscreenshottable until the player is disposed. Set it to false if the
+  /// host app needs screenshots to keep working during playback.
+  ///
+  /// Has no effect on iOS, where FairPlay already blanks protected video in
+  /// recordings without anything being asked of the app.
+  final bool secureScreen;
+
   /// Base URL of the FastPix DRM endpoints
   static const String _drmBaseUrl = 'https://api.fastpix.com/v1/on-demand/drm';
+
+  /// Origin the licence and certificate URLs are built on.
+  ///
+  /// Exposed so `warmPlaybackHosts()` warms the host the DRM handshake will
+  /// actually contact. Worth warming on its own account: licence acquisition
+  /// is the single largest fixed item on the tap path for protected content.
+  static const String drmHost = _drmBaseUrl;
 
   const FastPixPlayerDrmConfiguration({
     required this.drmToken,
     this.drmType,
     this.headers,
+    this.secureScreen = true,
   });
 
   /// DRM system for the current platform, honouring an explicit [drmType]
@@ -144,11 +172,13 @@ class FastPixPlayerDrmConfiguration {
     String? drmToken,
     FastPixDrmType? drmType,
     Map<String, String>? headers,
+    bool? secureScreen,
   }) {
     return FastPixPlayerDrmConfiguration(
       drmToken: drmToken ?? this.drmToken,
       drmType: drmType ?? this.drmType,
       headers: headers ?? this.headers,
+      secureScreen: secureScreen ?? this.secureScreen,
     );
   }
 }

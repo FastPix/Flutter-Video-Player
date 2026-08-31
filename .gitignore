@@ -29,3 +29,22 @@ migrate_working_dir/
 .flutter-plugins
 .flutter-plugins-dependencies
 build/
+
+# Local fork of flutter_chrome_cast (one Kotlin file patched for fMP4 HLS).
+# Build-time override only, not project source.
+third_party/
+
+# Local stream configuration for the example app.
+#
+# The demo's default playback IDs are committed in lib/src/demo_seed.dart, so
+# nothing here is required to build or run. This file is for local overrides
+# only, and is ignored because it is the natural place someone will paste a
+# playback or DRM token — which must never reach the repo or a built APK.
+example/.env
+
+
+# Gradle build output from the plugin's own android/ module. Regenerated on
+# every build, machine-specific, and includes lock files that conflict.
+android/.gradle/
+android/build/
+android/local.properties

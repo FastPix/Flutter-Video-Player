@@ -1,10 +1,13 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:better_player_plus/better_player_plus.dart';
 import 'package:fastpix_flutter_core_data/fastpix_flutter_core_data.dart';
 import 'package:fastpix_video_player/fastpix_video_player.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_windowmanager_plus/flutter_windowmanager_plus.dart';
 import 'models/valid_events.dart';
+import 'utils/fastpix_fairplay_bridge.dart';
 
 /// Controller for FastPix Player
 class FastPixPlayerController implements PlayerObserver {
@@ -86,10 +89,29 @@ class FastPixPlayerController implements PlayerObserver {
   FastPixPlayerErrorEvent? get lastError => _lastError;
 
   /// Initialize the controller with data source and configuration
+  ///
+  /// When [FastPixPreloadManager] holds a player warmed for [dataSource] under
+  /// a matching configuration, it is adopted and playback starts without the
+  /// manifest round trip, the DRM licence acquisition or decoder setup. That
+  /// is an optimisation and never a precondition: if no warm player is
+  /// available, or it was warmed for different settings, this takes exactly
+  /// the path it always has.
   Future<void> initialize({
     required FastPixPlayerDataSource dataSource,
     FastPixPlayerConfiguration? configuration,
+
+    /// Whether a player warmed by [FastPixPreloadManager] may be adopted.
+    ///
+    /// Set false to force a cold start — when measuring baseline startup
+    /// latency, for example, since an adopted player reports a near-zero
+    /// time-to-first-frame and would otherwise pollute the comparison.
+    bool adoptPreloaded = true,
   }) async {
+    // Started before any work so the measurement covers the whole of
+    // initialize(), including the DRM validation and the adoption attempt.
+    _playStartClock = Stopwatch()..start();
+    _firstFrameReported = false;
+
     // A new source is a new attempt: nothing from the previous one may leak
     // into it, or a retry with corrected credentials keeps reporting the old
     // failure.
@@ -99,6 +121,9 @@ class FastPixPlayerController implements PlayerObserver {
     _lastDispatchedEvent = null;
     _isEndedCalled = false;
     _lastEndedAt = null;
+    // A different video has different intrinsic dimensions.
+    _lastVideoSourceWidth = 0;
+    _lastVideoSourceHeight = 0;
 
     // Fail fast on an unusable DRM setup: the exception carries an actionable
     // message and is also emitted as an error event so listeners see it.
@@ -134,7 +159,7 @@ class FastPixPlayerController implements PlayerObserver {
                   dataSource.url,
                   video?.thumbnailUrl ?? na,
                 ),
-                playerData: PlayerData("fastpix-player", "1.0.1"),
+                playerData: PlayerData("fastpix-player", "1.0.2"),
                 customData:
                     customData
                         ?.map((element) => CustomData(value: element))
@@ -151,42 +176,218 @@ class FastPixPlayerController implements PlayerObserver {
           beaconUrl ?? '',
         );
 
+    // FairPlay only, iOS only, and always before the engine builds its player:
+    // the engine installs its resource-loader delegate during that build, and
+    // the patch substitutes ours at that moment or not at all.
+    //
+    // Best effort. A false answer changes nothing here — playback proceeds on
+    // the engine's own path exactly as it does without the patch.
+    await FastPixFairPlayBridge.configure(dataSource);
+
     final betterPlayerDataSource = dataSource.toBetterPlayerDataSource();
     final betterPlayerConfiguration = _createBetterPlayerConfiguration();
-    _betterPlayerController = BetterPlayerController(
-      betterPlayerConfiguration,
-      betterPlayerDataSource: betterPlayerDataSource,
-    );
+
+    // A warmed player is already past the manifest fetch, the DRM licence and
+    // decoder setup, which is what makes playback start instantly. It is never
+    // guaranteed to exist: the window may have moved on, the warm-up may have
+    // failed or still be in flight, the source may have been warmed over the
+    // network only, or it may have been warmed for a different configuration.
+    // Every one of those resolves to the same thing — a normal cold start.
+    //
+    // The fingerprint is computed from `_configuration`, not the `configuration`
+    // parameter: the two differ when the caller passes null, and using the
+    // parameter would make every adoption fail to match.
+    final BetterPlayerController? preloaded = adoptPreloaded
+        ? FastPixPreloadManager.instance.consume(
+            dataSource.playbackId,
+            fingerprint: betterPlayerConfigurationFingerprint(
+              configuration: _configuration,
+              dataSource: dataSource,
+            ),
+          )
+        : null;
+
+    _startedFromWarmPlayer = preloaded != null;
+    if (preloaded != null) {
+      _betterPlayerController = preloaded;
+      _adoptPreloadedController(preloaded, betterPlayerConfiguration);
+    } else {
+      _betterPlayerController = BetterPlayerController(
+        betterPlayerConfiguration,
+        betterPlayerDataSource: betterPlayerDataSource,
+      );
+    }
     // A fresh player is live again, so events must be accepted once more.
+    // An adopted player is just as fresh from this controller's point of view.
     _disposed = false;
+    // Both branches above replaced the player, so any fullscreen overlay the
+    // host registered is still pointing at the previous one.
+    _rebindFullscreenOverlay();
     _setupEventListeners();
+    await _applySecureScreen(dataSource);
     _currentState = FastPixPlayerState.ready;
     _eventManager.emit(FastPixPlayerReadyEvent(timestamp: DateTime.now()));
   }
 
-  /// Create BetterPlayerConfiguration from FastPix configuration
-  BetterPlayerConfiguration _createBetterPlayerConfiguration() {
-    final controlConfiguration = _configuration?.controlsConfiguration;
-    final baseConfig = BetterPlayerConfiguration(
-      autoPlay: controlConfiguration?.autoPlay ?? false,
-      looping: _dataSource?.loop ?? false,
-      aspectRatio: 16 / 9,
-      fit: BoxFit.contain,
-      controlsConfiguration: BetterPlayerControlsConfiguration(
-        controlBarColor:
-            controlConfiguration?.controlsBackgroundColor ?? Colors.black38,
-        enableRetry: controlConfiguration?.enableRetry ?? false,
-        enableSkips: controlConfiguration?.enableSkips ?? false,
-      ),
-      // iOS-specific configurations for better HLS support
-      allowedScreenSleep: false,
-      // Additional configurations for better replay support
-      autoDetectFullscreenDeviceOrientation: true,
-      autoDetectFullscreenAspectRatio: true,
-    );
+  /// Wall clock from [initialize] to the first frame actually rendered.
+  ///
+  /// Started at `initialize()` rather than at widget mount, because mount
+  /// happens after the work being measured and would flatter every number.
+  Stopwatch? _playStartClock;
 
-    return baseConfig;
+  /// Whether the player in use came from [FastPixPreloadManager].
+  ///
+  /// Reported alongside the timing, because a warm start and a cold start are
+  /// not comparable numbers and averaging them together hides the entire
+  /// effect being measured.
+  bool _startedFromWarmPlayer = false;
+
+  bool _firstFrameReported = false;
+
+  /// Log the tap-to-first-frame time, once per source.
+  ///
+  /// Fired from the progress tick because that is the first signal that media
+  /// is genuinely advancing — `initialized` only says the player accepted the
+  /// source, which on an adopted player already happened during the warm.
+  void _reportFirstFrameOnce() {
+    if (_firstFrameReported) return;
+    final clock = _playStartClock;
+    if (clock == null) return;
+
+    final position = _betterPlayerController?.videoPlayerController?.value.position;
+    // A progress tick at position zero is the player reporting for duty, not a
+    // rendered frame.
+    if (position == null || position <= Duration.zero) return;
+
+    _firstFrameReported = true;
+    clock.stop();
+
+    final drm = _dataSource?.drmEnabled ?? false;
+    FastPixWarmLog.preload(
+      'FIRST FRAME in ${clock.elapsedMilliseconds}ms  '
+      'drm=$drm  start=${_startedFromWarmPlayer ? "WARM (adopted)" : "COLD"}',
+      playbackId: _dataSource?.playbackId,
+    );
   }
+
+  /// Whether this controller turned FLAG_SECURE on.
+  ///
+  /// Tracked so [dispose] only clears a flag this controller set. Clearing it
+  /// unconditionally would re-enable screenshots for a host app that had set
+  /// the flag itself for its own reasons.
+  bool _secureScreenApplied = false;
+
+  /// Block screenshots and screen recording for DRM playback.
+  ///
+  /// Android only. The flag belongs to the Activity window, so it covers the
+  /// whole app while playback lasts — see
+  /// [FastPixPlayerDrmConfiguration.secureScreen], which turns this off.
+  ///
+  /// Best effort: a window flag that cannot be set is not a reason to fail
+  /// playback that is otherwise ready, so failures are reported as an event
+  /// rather than thrown.
+  Future<void> _applySecureScreen(FastPixPlayerDataSource dataSource) async {
+    if (!Platform.isAndroid) return;
+    if (!dataSource.drmEnabled) return;
+    if (dataSource.drmConfiguration?.secureScreen != true) return;
+
+    try {
+      await FlutterWindowManagerPlus.addFlags(
+        FlutterWindowManagerPlus.FLAG_SECURE,
+      );
+      _secureScreenApplied = true;
+    } catch (error) {
+      _eventManager.emit(
+        FastPixPlayerErrorEvent(
+          timestamp: DateTime.now(),
+          message:
+              'Could not block screen capture for this DRM stream: $error',
+        ),
+      );
+    }
+  }
+
+  /// Release FLAG_SECURE if this controller set it.
+  Future<void> _clearSecureScreen() async {
+    if (!_secureScreenApplied) return;
+    _secureScreenApplied = false;
+    try {
+      await FlutterWindowManagerPlus.clearFlags(
+        FlutterWindowManagerPlus.FLAG_SECURE,
+      );
+    } catch (_) {
+      // Leaving the flag set is safer than throwing while tearing down: the
+      // host app can still clear it, and playback is already finished.
+    }
+  }
+
+  /// Bring an adopted player up to playback settings.
+  ///
+  /// Only these two can be applied after the fact. Everything else —
+  /// controls, `fit`, aspect ratio, screen sleep — was already applied at warm
+  /// time through [buildBetterPlayerConfiguration], because
+  /// [BetterPlayerController.betterPlayerConfiguration] is a final field and
+  /// cannot be replaced now. That is what the fingerprint check in
+  /// [FastPixPreloadManager.consume] exists to guarantee.
+  void _adoptPreloadedController(
+    BetterPlayerController controller,
+    BetterPlayerConfiguration configuration,
+  ) {
+    unawaited(controller.setLooping(_dataSource?.loop ?? false));
+    if (configuration.autoPlay) unawaited(controller.play());
+  }
+
+  /// Wraps the player on the way into the fullscreen route.
+  ///
+  /// Fullscreen is a separate route that better_player builds itself, holding
+  /// nothing but the player: anything stacked over the player by the host —
+  /// the cast button, for one — lives in the page tree left behind, so it
+  /// cannot follow. This hook is the way back in. Set by [FastPixPlayer] while
+  /// it is mounted and cleared when it goes.
+  ///
+  /// Stored against the underlying player rather than in a plain field,
+  /// because the route builder baked into the configuration is a top-level
+  /// function — see [fastPixFullscreenOverlays]. That indirection is what lets
+  /// an adopted, preloaded player still show the overlay: its configuration
+  /// was fixed at warm time, long before this controller existed.
+  Widget Function(Widget player)? get fullscreenOverlayBuilder =>
+      _fullscreenOverlayBuilder;
+
+  set fullscreenOverlayBuilder(Widget Function(Widget player)? builder) {
+    _fullscreenOverlayBuilder = builder;
+    final player = _betterPlayerController;
+    if (player != null) fastPixFullscreenOverlays[player] = builder;
+  }
+
+  Widget Function(Widget player)? _fullscreenOverlayBuilder;
+
+  /// Re-point the overlay at whichever player this controller now owns.
+  ///
+  /// Needed because adoption swaps the underlying player after the host has
+  /// already handed over its builder: without this the overlay would stay
+  /// registered against a player that has been discarded, and fullscreen on a
+  /// warm start would come up bare.
+  void _rebindFullscreenOverlay() {
+    final player = _betterPlayerController;
+    final builder = _fullscreenOverlayBuilder;
+    if (player != null && builder != null) {
+      fastPixFullscreenOverlays[player] = builder;
+    }
+  }
+
+  /// Create BetterPlayerConfiguration from FastPix configuration
+  ///
+  /// Delegates to [buildBetterPlayerConfiguration]. The builder lives in
+  /// `utils/fastpix_better_player_configuration.dart` so that the preload path
+  /// can construct a *warmed* controller with exactly these settings:
+  /// [BetterPlayerController.betterPlayerConfiguration] is a final field, so a
+  /// player warmed with different settings keeps them for its entire life and
+  /// nothing at adoption time can correct it. One builder, both paths.
+  BetterPlayerConfiguration _createBetterPlayerConfiguration() =>
+      buildBetterPlayerConfiguration(
+        configuration: _configuration,
+        dataSource: _dataSource,
+      );
 
   /// Setup event listeners
   void _setupEventListeners() {
@@ -200,6 +401,20 @@ class FastPixPlayerController implements PlayerObserver {
   // Player dimensions
   double _playerWidth = 0.0;
   double _playerHeight = 0.0;
+
+  /// Last non-zero intrinsic size reported by the platform player.
+  ///
+  /// The metrics SDK divides the player size by the video size to work out
+  /// view scaling, with no guard against a zero denominator: a zero here
+  /// produces Infinity or NaN and its `toInt()` throws on every pulse event.
+  ///
+  /// The platform player reports a zero size whenever its render surface is
+  /// gone — which is exactly what happens while casting, since the local
+  /// player is removed from the widget tree. The intrinsic size of the video
+  /// has not actually changed at that point, so the last known value is the
+  /// truthful answer and zero is the lie.
+  int _lastVideoSourceWidth = 0;
+  int _lastVideoSourceHeight = 0;
 
   PlayerEvent? _lastDispatchedEvent;
   bool _isEndedCalled = false;
@@ -376,6 +591,7 @@ class FastPixPlayerController implements PlayerObserver {
   /// Each check is evaluated against the event dispatched by the preceding
   /// one, so the order of these blocks is significant.
   void _handleProgressTick() {
+    _reportFirstFrameOnce();
     updatePlayerDimensions();
     if (_lastDispatchedEvent == PlayerEvent.buffering) {
       _tryDispatch(
@@ -728,8 +944,25 @@ class FastPixPlayerController implements PlayerObserver {
     _disposed = true;
     _betterPlayerController?.removeEventsListener(_onPlayerEvent);
     _betterPlayerController?.removeEventsListener(_oniOSPlayerEvent);
-    _betterPlayerController?.dispose();
+    // `forceDispose` is required, not defensive.
+    //
+    // better_player's dispose() begins with:
+    //     if (!betterPlayerConfiguration.autoDispose && !forceDispose) return;
+    // A player adopted from [FastPixPreloadManager] was built with
+    // `autoDispose: false` so the manager — not a widget — owns its lifetime,
+    // which means a plain dispose() on it does nothing at all and leaks its
+    // decoder, plus its MediaDrm session for protected content.
+    //
+    // For a normally constructed player this changes nothing:
+    // BetterPlayerConfiguration defaults `autoDispose` to true, so the guard
+    // above is already false and disposal proceeds either way.
+    _betterPlayerController?.dispose(forceDispose: true);
     _betterPlayerController = null;
+
+    // Screenshots have to work again once DRM playback is over: the flag is
+    // window wide, so leaving it set would silently disable them for the rest
+    // of the host app's life.
+    await _clearSecureScreen();
 
     final previousState = _currentState;
     _currentState = FastPixPlayerState.initialized;
@@ -848,9 +1081,12 @@ class FastPixPlayerController implements PlayerObserver {
 
   @override
   int videoSourceHeight() {
-    return betterPlayerController?.videoPlayerController?.value.size?.height
+    final height =
+        betterPlayerController?.videoPlayerController?.value.size?.height
             .toInt() ??
         0;
+    if (height > 0) _lastVideoSourceHeight = height;
+    return _lastVideoSourceHeight;
   }
 
   String _inferMimeTypeFromUrl(String url) {
@@ -874,9 +1110,12 @@ class FastPixPlayerController implements PlayerObserver {
 
   @override
   int videoSourceWidth() {
-    return betterPlayerController?.videoPlayerController?.value.size?.width
+    final width =
+        betterPlayerController?.videoPlayerController?.value.size?.width
             .toInt() ??
         0;
+    if (width > 0) _lastVideoSourceWidth = width;
+    return _lastVideoSourceWidth;
   }
 
   @override

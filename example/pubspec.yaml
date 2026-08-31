@@ -30,6 +30,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  path_provider: ^2.1.5
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -37,10 +38,26 @@ dependencies:
 
   fastpix_video_player:
     path: ../
+  flutter_chrome_cast: ^1.4.6
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
+
+  # Device validation for preloading and precaching. Everything these features
+  # do that matters — building a real ExoPlayer without a surface, acquiring a
+  # Widevine licence, writing bytes into the cache the player reads from —
+  # happens on the platform side and is invisible to a unit test with an
+  # injected fake. See integration_test/preload_device_test.dart.
+  integration_test:
+    sdk: flutter
+
+  # Direct, for the engine baseline test only. It builds a
+  # BetterPlayerController with no FastPix code in the way, to establish
+  # whether an exception seen during preload teardown is the engine's or ours.
+  # Matches the constraint the package itself declares, so the baseline test
+  # exercises the same engine the SDK is pinned to.
+  better_player_plus: ^1.2.1
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -90,3 +107,16 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+# Temporary local fork of flutter_chrome_cast 1.4.6, patched in third_party/
+# pending upstream fixes:
+#
+# * hlsSegmentFormat and hlsVideoSegmentFormat are serialised over the method
+#   channel but the Android MediaInfo builder never reads them, so fMP4/CMAF
+#   streams never play.
+# * Android sends MediaTrack.getType() as an int while the Dart mapper is
+#   typed String, so decoding any Android track threw and media status parsing
+#   failed — leaving subtitle tracks unreachable on Android.
+# * Track subtypes were compared as enum names against those same ints, so
+#   captions could not be told apart from subtitles or from chapter tracks.
+

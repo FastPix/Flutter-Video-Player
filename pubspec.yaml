@@ -1,6 +1,6 @@
 name: fastpix_video_player
 description: "A high-performance video player for Flutter with advanced features and customizable UI."
-version: 1.0.1
+version: 1.0.2
 homepage: https://github.com/FastPix/Flutter-Video-Player
 repository: https://github.com/FastPix/Flutter-Video-Player
 issue_tracker: https://github.com/FastPix/Flutter-Video-Player/issues
@@ -14,7 +14,35 @@ dependencies:
     sdk: flutter
   path_provider: ^2.1.5
   permission_handler: ^12.0.0+1
-  better_player_plus: ^1.0.8
+  device_info_plus: ^11.5.0
+  # Floor is 1.2.1, not 1.0.8, because the two differ in Objective-C surface
+  # and only 1.2.1 is tested. 1.0.8 ships `BetterPlayer` as Objective-C; 1.2.1
+  # rewrote it in Swift with no `@objc`, which changes which selectors this
+  # package's iOS hooks can find. A range spanning both resolves to materially
+  # different iOS behaviour with no error either way.
+  #
+  # Note the FairPlay patch itself is unaffected — it hooks Apple's
+  # `AVAssetResourceLoader.setDelegate:queue:`, which is the same selector in
+  # both, and matches the engine's DRM delegate by name substring so the Swift
+  # module prefix does not break it. The pin is about the rest of the surface.
+  better_player_plus: ^1.2.1
+  flutter_chrome_cast: ^1.4.6  #latest version
+  # FLAG_SECURE for DRM playback. Android only, which is all that is needed:
+  # iOS blanks FairPlay video in recordings without being asked.
+  flutter_windowmanager_plus: ^1.1.0
+  # Keeps the screen awake while casting. The local player's own
+  # `allowedScreenSleep: false` does not cover it — that player is paused and
+  # offstage during a Cast session, so it releases its wakelock and the phone
+  # locks mid-playback while the TV is still playing.
+  #
+  # Already present transitively (better_player_plus uses it for the same
+  # purpose), so declaring it directly adds no weight — it makes an existing
+  # dependency explicit rather than relying on someone else's.
+  wakelock_plus: ^1.2.8
+  # Reports whether a preload ran on Wi-Fi or cellular. Already present
+  # transitively via fastpix_flutter_core_data; declared directly because this
+  # package now imports it.
+  connectivity_plus: ^6.1.5
   fastpix_flutter_core_data: ^1.0.2
 
 platforms:
@@ -31,6 +59,25 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  plugin:
+    platforms:
+      # The two platforms do different amounts, because the engine gives them
+      # different seams.
+      #
+      # Android: precaching writes into better_player's own media3 cache, which
+      # is reachable from a sibling plugin, so a warm written here is read by
+      # playback.
+      #
+      # iOS: precaching HLS is refused by the engine outright
+      # (CacheManager.isPreCacheSupported excludes application/vnd.apple.mpegurl),
+      # so the iOS side implements preload asset warming only — DNS, TLS and the
+      # playlist fetches. It cannot hand the warmed asset to playback, because
+      # BetterPlayer.m builds its own; see FastPixPlayerItemPreloader.swift.
+      android:
+        package: com.fastpix.videoplayer
+        pluginClass: FastPixVideoPlayerPlugin
+      ios:
+        pluginClass: FastPixVideoPlayerPlugin
 
 # To add assets to your package, add an assets section, like this:
 # assets:

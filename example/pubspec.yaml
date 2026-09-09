@@ -77,6 +77,16 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # Local stream configuration, read at launch by DemoSeed.
+  #
+  # The directory is committed (with a .gitkeep, since a *declared* asset
+  # directory that does not exist is a build failure) but its contents are
+  # gitignored: `streams.txt` is where playback and DRM tokens go, and a
+  # credential must not reach the repo. A missing file is not an error — the
+  # app falls back to the shipped catalog.
+  assets:
+    - assets/local/
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

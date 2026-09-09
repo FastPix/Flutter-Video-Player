@@ -15,7 +15,7 @@ migrate_working_dir/
 *.ipr
 *.iws
 .idea/
-
+.claude/
 # The .vscode folder contains launch configuration and tasks you configure in
 # VS Code which you may wish to be included in version control, so this line
 # is commented out by default.
@@ -41,6 +41,12 @@ third_party/
 # only, and is ignored because it is the natural place someone will paste a
 # playback or DRM token — which must never reach the repo or a built APK.
 example/.env
+
+# Local stream configuration read at launch (playback IDs with their tokens).
+# The directory itself is committed — a declared asset directory that does not
+# exist fails the build — but nothing anyone puts in it is.
+example/assets/local/*
+!example/assets/local/.gitkeep
 
 
 # Gradle build output from the plugin's own android/ module. Regenerated on

@@ -30,6 +30,72 @@ class FastPixPlayerEventTypes {
   // Fullscreen events
   static const String fullscreenChanged = 'fullscreenChanged';
 
+  // Custom-UI events
+  //
+  // Emitted by the custom-UI functionality API. Additive: fullscreen still
+  // uses [fullscreenChanged] above, and quality still emits the raw-attributes
+  // [qualityChanged]; [qualityLevelChanged] is the FastPix-owned-model variant.
+
+  /// Fired when the playback speed changes.
+  static const String playbackRateChanged = 'playbackRateChanged';
+
+  /// Fired when a scrub interaction starts.
+  static const String scrubStarted = 'scrubStarted';
+
+  /// Fired when a scrub interaction ends and a seek is issued.
+  static const String scrubEnded = 'scrubEnded';
+
+  /// Fired when quality levels first become available.
+  static const String qualityLevelsReady = 'qualityLevelsReady';
+
+  /// Fired when the active quality changes, automatic switches included.
+  static const String qualityLevelChanged = 'qualityLevelChanged';
+
+  /// Fired when audio tracks first become available.
+  static const String audioTracksReady = 'audioTracksReady';
+
+  /// Fired when the active audio track changes.
+  static const String audioTrackChanged = 'audioTrackChanged';
+
+  /// Fired when subtitle tracks first become available.
+  static const String subtitleTracksReady = 'subtitleTracksReady';
+
+  /// Fired when the active subtitle track changes or is disabled.
+  static const String subtitleChanged = 'subtitleChanged';
+
+  /// Fired when Picture-in-Picture starts or stops.
+  static const String pipChanged = 'pipChanged';
+
+  // Playlist events
+  //
+  // Emitted through the ordinary event system, never through the analytics
+  // dispatch: the transition table describes the beacon's playback state
+  // machine, and playlist vocabulary is not part of it.
+
+  /// Fired when a playlist is set, replaced or cleared.
+  static const String playlistChanged = 'playlistChanged';
+
+  /// Fired when the active item changes, and only then.
+  static const String playlistItemChanged = 'playlistItemChanged';
+
+  /// Fired when the final item finishes and no repeat applies.
+  static const String playlistEnded = 'playlistEnded';
+
+  // Skip segment events
+
+  /// Fired when playback enters a declared segment: show the skip control.
+  static const String skipAvailable = 'skipAvailable';
+
+  /// Fired when no segment is active any longer: hide the control.
+  static const String skipHidden = 'skipHidden';
+
+  /// Fired when a requested skip has been performed.
+  static const String skipCompleted = 'skipCompleted';
+
+  /// Fired when a segment is rejected, or a skip cannot be performed. Never a
+  /// playback failure.
+  static const String skipFailed = 'skipFailed';
+
   // State events
   static const String ready = 'ready';
   static const String stateChanged = 'stateChanged';
@@ -114,6 +180,23 @@ class FastPixPlayerEventTypes {
     positionChanged,
     volumeChanged,
     fullscreenChanged,
+    playbackRateChanged,
+    scrubStarted,
+    scrubEnded,
+    qualityLevelsReady,
+    qualityLevelChanged,
+    audioTracksReady,
+    audioTrackChanged,
+    subtitleTracksReady,
+    subtitleChanged,
+    pipChanged,
+    playlistChanged,
+    playlistItemChanged,
+    playlistEnded,
+    skipAvailable,
+    skipHidden,
+    skipCompleted,
+    skipFailed,
     ready,
     stateChanged,
     error,
@@ -148,6 +231,35 @@ class FastPixPlayerEventTypes {
 
   /// Get control-related event types
   static List<String> get controls => [volumeChanged, fullscreenChanged];
+
+  /// Get custom-UI event types
+  static List<String> get customUi => [
+    playbackRateChanged,
+    scrubStarted,
+    scrubEnded,
+    qualityLevelsReady,
+    qualityLevelChanged,
+    audioTracksReady,
+    audioTrackChanged,
+    subtitleTracksReady,
+    subtitleChanged,
+    pipChanged,
+  ];
+
+  /// Get playlist-related event types
+  static List<String> get playlist => [
+    playlistChanged,
+    playlistItemChanged,
+    playlistEnded,
+  ];
+
+  /// Get skip-segment event types
+  static List<String> get skip => [
+    skipAvailable,
+    skipHidden,
+    skipCompleted,
+    skipFailed,
+  ];
 
   /// Get state-related event types
   static List<String> get state => [ready, stateChanged];

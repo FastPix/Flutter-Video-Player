@@ -1,8 +1,10 @@
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../models/fastpix_player_data_source.dart';
+import 'fastpix_drm_log.dart';
 import 'fastpix_warm_log.dart';
 
 /// Hands the FairPlay URLs to the iOS patch that makes them work.
@@ -34,10 +36,19 @@ class FastPixFairPlayBridge {
     'fastpix_video_player/precache',
   );
 
+  /// Lifts the iOS-only check so a test can exercise the rest.
+  ///
+  /// The check reads the *host* platform, which is never iOS under
+  /// `flutter test`, so without this seam nothing here is reachable — including
+  /// whether a warm player is configured with its own video's URLs, which is
+  /// the property this class exists to hold.
+  @visibleForTesting
+  static bool debugApplyOnEveryPlatform = false;
+
   /// Whether [source] needs the patch: FairPlay is iOS-only, and a certificate
   /// URL is what distinguishes it from Widevine.
   static bool _applies(FastPixPlayerDataSource source) =>
-      Platform.isIOS &&
+      (Platform.isIOS || debugApplyOnEveryPlatform) &&
       source.drmEnabled &&
       (source.drmConfiguration?.certificateUrl(source.playbackId) ?? '')
           .isNotEmpty;
@@ -55,10 +66,26 @@ class FastPixFairPlayBridge {
       final installed = await _channel.invokeMethod<bool>(
         'setFairPlayConfig',
         <String, String?>{
+          // Named, so the patch registers this pair against this video rather
+          // than only holding it as "the last one configured". A player warmed
+          // in the background is built while a *different* video is playing,
+          // and would otherwise capture that video's licence URL.
+          'playbackId': source.playbackId,
           'certificateUrl': drm.certificateUrl(source.playbackId),
           'licenseUrl': drm.licenseUrl(source.playbackId),
         },
       );
+      if (installed == true) {
+        // Configuration, not an acquisition: the patch now *holds* a licence
+        // URL and will POST to it when AVFoundation asks for a key. Counting
+        // it as an arming would charge every iOS play twice, since the play
+        // itself is counted below. The real request is numbered natively —
+        // `[FastPixDRM/swizzle] licence request #N`.
+        FastPixDrmLog.configured(
+          playbackId: source.playbackId,
+          host: Uri.tryParse(drm.resolvedBaseUrl)?.host ?? '',
+        );
+      }
       if (installed != true) {
         // Loudly: the alternative is the engine's EZDRM path failing later with
         // an opaque licence error that names nothing.
@@ -83,7 +110,7 @@ class FastPixFairPlayBridge {
   /// Interception stops, and protected playback falls back to the engine's own
   /// delegate as though the patch were absent.
   static Future<void> clear() async {
-    if (!Platform.isIOS) return;
+    if (!Platform.isIOS && !debugApplyOnEveryPlatform) return;
     try {
       await _channel.invokeMethod<bool>('setFairPlayConfig', const {});
     } on MissingPluginException {

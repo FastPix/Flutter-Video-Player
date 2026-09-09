@@ -37,6 +37,7 @@ class _StreamFormSheetState extends State<StreamFormSheet> {
   late final TextEditingController _subtitleLabel;
   late final TextEditingController _subtitleLanguage;
 
+  late final TextEditingController _drmHost;
   late bool _drmEnabled;
   late bool _isLive;
   late bool _subtitlesOnByDefault;
@@ -56,6 +57,10 @@ class _StreamFormSheetState extends State<StreamFormSheet> {
     _host = TextEditingController(
       text: initial?.streamHost ?? 'stream.fastpix.com',
     );
+    // Blank means the package default, api.fastpix.com. It is prefilled from
+    // the stream host's environment for a new stream, since the manifest and
+    // the licence always come from the same one.
+    _drmHost = TextEditingController(text: initial?.drmHost ?? '');
     _token = TextEditingController(text: initial?.token ?? '');
     _drmToken = TextEditingController(text: initial?.drmToken ?? '');
     _subtitleUrl = TextEditingController(text: subtitle?.url ?? '');
@@ -74,6 +79,7 @@ class _StreamFormSheetState extends State<StreamFormSheet> {
     _playbackId.dispose();
     _title.dispose();
     _host.dispose();
+    _drmHost.dispose();
     _token.dispose();
     _drmToken.dispose();
     _subtitleUrl.dispose();
@@ -112,6 +118,7 @@ class _StreamFormSheetState extends State<StreamFormSheet> {
     final host = _host.text.trim();
     final token = _token.text.trim();
     final drmToken = _drmToken.text.trim();
+    final drmHost = _drmHost.text.trim();
 
     Navigator.pop(
       context,
@@ -119,6 +126,7 @@ class _StreamFormSheetState extends State<StreamFormSheet> {
         playbackId: playbackId,
         title: title.isEmpty ? playbackId : title,
         streamHost: host.isEmpty ? null : host,
+        drmHost: drmHost.isEmpty ? null : drmHost,
         token: token.isEmpty ? null : token,
         drmToken: drmToken.isEmpty ? null : drmToken,
         drmEnabled: _drmEnabled,
@@ -222,6 +230,18 @@ class _StreamFormSheetState extends State<StreamFormSheet> {
                 TextField(
                   controller: _drmToken,
                   decoration: const InputDecoration(labelText: 'DRM token'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _drmHost,
+                  decoration: const InputDecoration(
+                    labelText: 'DRM host',
+                    // The licence is a second origin, and pointing it at the
+                    // wrong environment fails at the handshake — which reads
+                    // like a bad token, not a wrong host.
+                    helperText: 'Blank uses api.fastpix.com. Match the stream '
+                        'host environment.',
+                  ),
                 ),
               ],
 

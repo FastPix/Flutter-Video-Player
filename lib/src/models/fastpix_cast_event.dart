@@ -11,7 +11,7 @@ class FastPixCastAvailableEvent extends FastPixPlayerEvent {
   /// Number of receivers currently discovered.
   final int deviceCount;
 
-  const FastPixCastAvailableEvent({
+  FastPixCastAvailableEvent({
     required super.timestamp,
     required this.deviceCount,
     super.data,
@@ -23,7 +23,7 @@ class FastPixCastStartedEvent extends FastPixPlayerEvent {
   /// The receiver now playing, when the session reported one.
   final FastPixCastDevice? device;
 
-  const FastPixCastStartedEvent({
+  FastPixCastStartedEvent({
     required super.timestamp,
     required this.device,
     super.data,
@@ -42,7 +42,7 @@ class FastPixCastEndedEvent extends FastPixPlayerEvent {
   /// Last position observed on the receiver, for resuming locally.
   final Duration position;
 
-  const FastPixCastEndedEvent({
+  FastPixCastEndedEvent({
     required super.timestamp,
     required this.device,
     required this.position,
@@ -70,7 +70,7 @@ class FastPixCastErrorEvent extends FastPixPlayerEvent {
   /// of an English sentence.
   final String? underlyingError;
 
-  const FastPixCastErrorEvent({
+  FastPixCastErrorEvent({
     required super.timestamp,
     required this.message,
     required this.errorCode,

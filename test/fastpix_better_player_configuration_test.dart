@@ -246,6 +246,48 @@ void main() {
       );
     });
 
+    // The fingerprint's *field set* is the contract, not just its behaviour.
+    // The test below proves each field still moves the fingerprint; this one
+    // proves no field was added, removed or reordered — a change none of the
+    // other assertions can see, because they only ever compare a fingerprint
+    // against another fingerprint built by the same code.
+    //
+    // Drift here is silent and total: `_PreloadEntry.fingerprint` is compared
+    // for equality, so an extra field makes every warmed player refuse
+    // adoption and preloading quietly stops working with no error anywhere.
+    // If this test fails, the field list in
+    // `betterPlayerConfigurationFingerprint` changed — confirm the change was
+    // intended, confirm `buildBetterPlayerConfiguration` reads the same set,
+    // then update the constants below.
+    test('the fingerprint field set is unchanged', () {
+      const int fieldCount = 28;
+      const String golden =
+          'false|false|~|~|~|~|~|onTap|true|true|true|true|true|true|true|'
+          'true|true|false|false|~|~|~|~|~|25000|6553600|3000|6000';
+
+      final actual = betterPlayerConfigurationFingerprint(
+        configuration: config(),
+        dataSource: source(),
+      );
+
+      expect(
+        actual.split('|'),
+        hasLength(fieldCount),
+        reason:
+            'the fingerprint gained or lost a field; every warmed player '
+            'built before the change would now be refused',
+      );
+      expect(actual, golden);
+
+      // Absent inputs must still produce the same shape, or a fingerprint
+      // taken before a source is known cannot be compared with one taken
+      // after.
+      expect(
+        betterPlayerConfigurationFingerprint().split('|'),
+        hasLength(fieldCount),
+      );
+    });
+
     // Each of these changes what the warmed player renders or where it starts,
     // and none of them can be corrected after construction.
     test('every adoption-relevant field changes the fingerprint', () {

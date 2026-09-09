@@ -81,6 +81,60 @@ static void FastPixDrmLog(NSString *format, ...) {
     NSLog(@"%@ %@", kFastPixDrmLogTag, message);
 }
 
+#pragma mark - Counters
+
+/// How many licence and certificate requests this process has made, and how
+/// many per content id.
+///
+/// Preloading multiplies licence acquisition: a warm window of three protected
+/// titles fetches three licences for videos nobody has asked for, and an
+/// eviction throws that work away. Playback looks identical either way, so the
+/// count is the only evidence. Kept here because this is the one place on iOS
+/// where the request is genuinely ours — everything upstream of it can only
+/// report intent.
+///
+/// Guarded by a lock: `shouldWaitForLoadingOfRequestedResource` is called on
+/// AVFoundation's own queue, and more than one item can be loading at once.
+static NSUInteger _fpLicenceRequestCount = 0;
+static NSUInteger _fpCertificateRequestCount = 0;
+static NSMutableDictionary<NSString *, NSNumber *> *_fpLicenceCountsByContentId = nil;
+static NSLock *_fpCounterLock = nil;
+
+static void FastPixDrmCounterInit(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        _fpCounterLock = [NSLock new];
+        _fpLicenceCountsByContentId = [NSMutableDictionary dictionary];
+    });
+}
+
+/// Record a licence request for [contentId] and return its ordinal.
+static NSUInteger FastPixCountLicenceRequest(NSString *contentId) {
+    FastPixDrmCounterInit();
+    [_fpCounterLock lock];
+    _fpLicenceRequestCount += 1;
+    NSUInteger total = _fpLicenceRequestCount;
+    NSUInteger forId = _fpLicenceCountsByContentId[contentId].unsignedIntegerValue + 1;
+    _fpLicenceCountsByContentId[contentId] = @(forId);
+    [_fpCounterLock unlock];
+    FastPixDrmLog(@"licence request #%lu (contentId=%@ #%lu for this id)",
+                  (unsigned long)total, contentId, (unsigned long)forId);
+    return total;
+}
+
+/// Record a certificate fetch and return its ordinal.
+///
+/// Counted separately because it is a *second* round trip on the tap path and
+/// is not cached by this patch: every key request fetches it again.
+static NSUInteger FastPixCountCertificateRequest(void) {
+    FastPixDrmCounterInit();
+    [_fpCounterLock lock];
+    _fpCertificateRequestCount += 1;
+    NSUInteger total = _fpCertificateRequestCount;
+    [_fpCounterLock unlock];
+    return total;
+}
+
 /// A URL reduced to scheme, host and path.
 ///
 /// FastPix signs licence and certificate URLs with a `token` query parameter
@@ -113,19 +167,23 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
 
 @interface FastPixFairPlayLoader : NSObject <AVAssetResourceLoaderDelegate>
 - (instancetype)initWithCertificateURL:(NSURL *)certificateURL
-                            licenseURL:(nullable NSURL *)licenseURL;
+                            licenseURL:(nullable NSURL *)licenseURL
+                            playbackId:(nullable NSString *)playbackId;
 @end
 
 @implementation FastPixFairPlayLoader {
     NSURL *_certificateURL;
     NSURL *_licenseURL;
+    NSString *_playbackId;
 }
 
 - (instancetype)initWithCertificateURL:(NSURL *)certificateURL
-                            licenseURL:(NSURL *)licenseURL {
+                            licenseURL:(NSURL *)licenseURL
+                            playbackId:(NSString *)playbackId {
     if ((self = [super init])) {
         _certificateURL = certificateURL;
         _licenseURL = licenseURL ?: [NSURL URLWithString:kEzDrmDefaultLicenseServer];
+        _playbackId = playbackId;
     }
     return self;
 }
@@ -150,6 +208,14 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
         FastPixDrmLog(@"licence URL could not be built.");
         return nil;
     }
+
+    // The FastPix licence path ends in the playback ID, which is the id worth
+    // counting by — `assetId` is EZDRM's trailing-36-characters convention and
+    // is not a FastPix identifier.
+    NSString *countedId = endpoint.path.lastPathComponent.length
+        ? endpoint.path.lastPathComponent
+        : (assetId.length ? assetId : (endpoint.host ?: @"?"));
+    FastPixCountLicenceRequest(countedId);
 
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:endpoint];
     request.HTTPMethod = @"POST";
@@ -222,7 +288,11 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
         ? [uriString substringFromIndex:uriString.length - 36]
         : @"";
 
+    NSUInteger certRequest = FastPixCountCertificateRequest();
     NSData *certificate = [NSData dataWithContentsOfURL:_certificateURL];
+    FastPixDrmLog(@"certificate request #%lu from %@ (%lu bytes)",
+                  (unsigned long)certRequest, FastPixRedact(_certificateURL),
+                  (unsigned long)certificate.length);
     if (certificate == nil) {
         FastPixDrmLog(@"certificate fetch failed from %@.", FastPixRedact(_certificateURL));
         [loadingRequest finishLoadingWithError:
@@ -243,8 +313,13 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
         return YES;
     }
 
-    FastPixDrmLog(@"key request: contentId=%@ ezdrm=%@ certBytes=%lu",
-                  contentId, usesEzDrm ? @"YES" : @"NO", (unsigned long)certificate.length);
+    // Both identifiers, because they are what a cross-wired configuration
+    // disagrees about: the licence URL names one video and the content id
+    // another. The server answers 200 either way, so the log line is the only
+    // place the pairing is visible.
+    FastPixDrmLog(@"key request: playbackId=%@ contentId=%@ ezdrm=%@ certBytes=%lu",
+                  _playbackId ?: @"(unmatched)", contentId,
+                  usesEzDrm ? @"YES" : @"NO", (unsigned long)certificate.length);
 
     NSError *spcError = nil;
     NSData *spc = [loadingRequest streamingContentKeyRequestDataForApp:certificate
@@ -289,14 +364,91 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
 /// which looks exactly like a licence server failure.
 static const void *kFastPixRetainedLoaderKey = &kFastPixRetainedLoaderKey;
 
+/// Key under which an asset's own URL is remembered on its resource loader.
+///
+/// `AVAssetResourceLoader` exposes no back-pointer to the asset it belongs to,
+/// so the link is recorded at the one moment both are in hand — asset
+/// construction, which `FastPixCachingAssetHook` already intercepts.
+static const void *kFastPixLoaderAssetURLKey = &kFastPixLoaderAssetURLKey;
+
 static BOOL _fpFairPlayInstalled = NO;
+
+/// The most recently supplied pair, used when an asset cannot be matched to a
+/// registered one. This is the whole of what the patch held before per-video
+/// registration existed, and is kept as the fallback so a miss behaves the way
+/// the patch always did rather than failing.
 static NSURL *_fpCertificateURL = nil;
 static NSURL *_fpLicenseURL = nil;
+
+/// Registered configurations, keyed by playback id.
+///
+/// Bounded: a session that plays thousands of videos would otherwise grow this
+/// without limit. Dropping the oldest costs a fallback to the pair above, not a
+/// failure.
+static NSMutableDictionary<NSString *, NSArray *> *_fpConfigsByPlaybackId = nil;
+static NSMutableArray<NSString *> *_fpConfigOrder = nil;
+static const NSUInteger kFastPixMaxRegisteredConfigs = 64;
+
+/// The playback id a FastPix stream URL carries: its filename without the
+/// `.m3u8` or `.mpd` extension. Nil for any other shape, which falls back.
+static NSString *FastPixPlaybackIdFromURL(NSURL *url) {
+    if (url == nil) return nil;
+    NSString *identifier = url.URLByDeletingPathExtension.lastPathComponent;
+    return identifier.length > 0 ? identifier : nil;
+}
 
 @implementation FastPixFairPlayPatch
 
 + (BOOL)isInstalled {
     return _fpFairPlayInstalled;
+}
+
++ (void)registerCertificateUrl:(NSString *)certificateUrl
+                    licenseUrl:(NSString *)licenseUrl
+                 forPlaybackId:(NSString *)playbackId {
+    if (certificateUrl.length == 0 || playbackId.length == 0) return;
+
+    NSURL *certificate = [NSURL URLWithString:certificateUrl];
+    if (certificate == nil) return;
+    NSURL *licence = licenseUrl.length > 0 ? [NSURL URLWithString:licenseUrl] : nil;
+
+    @synchronized (self) {
+        if (_fpConfigsByPlaybackId == nil) {
+            _fpConfigsByPlaybackId = [NSMutableDictionary dictionary];
+            _fpConfigOrder = [NSMutableArray array];
+        }
+        if (_fpConfigsByPlaybackId[playbackId] == nil) {
+            [_fpConfigOrder addObject:playbackId];
+            while (_fpConfigOrder.count > kFastPixMaxRegisteredConfigs) {
+                [_fpConfigsByPlaybackId removeObjectForKey:_fpConfigOrder.firstObject];
+                [_fpConfigOrder removeObjectAtIndex:0];
+            }
+        }
+        _fpConfigsByPlaybackId[playbackId] =
+            @[certificate, licence ?: (id)NSNull.null];
+    }
+    FastPixDrmLog(@"registered %@: cert=%@ licence=%@", playbackId,
+                  FastPixRedact(certificate), FastPixRedact(licence));
+}
+
++ (void)noteAsset:(AVURLAsset *)asset url:(NSURL *)url {
+    if (asset == nil || url == nil) return;
+
+    // The loader, not the asset, and only when it exists. This runs *inside*
+    // `initWithURL:options:`, and AVFoundation builds its own assets on
+    // internal queues — `com.apple.avplayeritem.ivars` among them — where the
+    // object is not finished constructing and has no resource loader yet.
+    // `objc_setAssociatedObject` dereferences its object, so a nil one is not
+    // a no-op: it is a crash on the player's own queue.
+    //
+    // Skipping those costs nothing. They are not the asset playback loads a
+    // licence for, and an unrecorded asset falls back to the last configured
+    // pair exactly as it did before any of this existed.
+    AVAssetResourceLoader *loader = asset.resourceLoader;
+    if (loader == nil) return;
+
+    objc_setAssociatedObject(loader, kFastPixLoaderAssetURLKey, url,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 + (void)setCertificateUrl:(NSString *)certificateUrl
@@ -305,6 +457,8 @@ static NSURL *_fpLicenseURL = nil;
         if (certificateUrl.length == 0 || (id)certificateUrl == NSNull.null) {
             _fpCertificateURL = nil;
             _fpLicenseURL = nil;
+            [_fpConfigsByPlaybackId removeAllObjects];
+            [_fpConfigOrder removeAllObjects];
             return;
         }
         _fpCertificateURL = [NSURL URLWithString:certificateUrl];
@@ -361,25 +515,48 @@ static NSURL *_fpLicenseURL = nil;
         [delegateClass containsString:@"BetterPlayerEzDrmAssetsLoaderDelegate"];
 
     if (isEngineDrmDelegate) {
+        // Which video this loader belongs to, taken from the URL its asset was
+        // built with. Without it there is only the process-wide pair, which
+        // belongs to whichever video was configured last — and a player warmed
+        // in the background is built while a *different* video is playing.
+        NSURL *assetURL = objc_getAssociatedObject(self, kFastPixLoaderAssetURLKey);
+        NSString *playbackId = FastPixPlaybackIdFromURL(assetURL);
+
         NSURL *certificateURL = nil;
         NSURL *licenseURL = nil;
+        BOOL matched = NO;
         @synchronized (FastPixFairPlayPatch.class) {
-            certificateURL = _fpCertificateURL;
-            licenseURL = _fpLicenseURL;
+            NSArray *registered = playbackId ? _fpConfigsByPlaybackId[playbackId] : nil;
+            if (registered != nil) {
+                certificateURL = registered.firstObject;
+                id licence = registered.lastObject;
+                licenseURL = (licence == NSNull.null) ? nil : licence;
+                matched = YES;
+            } else {
+                certificateURL = _fpCertificateURL;
+                licenseURL = _fpLicenseURL;
+            }
         }
 
         if (certificateURL != nil) {
             FastPixFairPlayLoader *replacement =
                 [[FastPixFairPlayLoader alloc] initWithCertificateURL:certificateURL
-                                                          licenseURL:licenseURL];
+                                                          licenseURL:licenseURL
+                                                          playbackId:playbackId];
 
             // The loader holds its delegate weakly; this is what keeps ours
             // alive for as long as the loader itself.
             objc_setAssociatedObject(self, kFastPixRetainedLoaderKey, replacement,
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
-            FastPixDrmLog(@"handling FairPlay for this asset (licence %@).",
-                          FastPixRedact(licenseURL));
+            // Said either way, because the two cases differ in exactly the
+            // property that matters: a matched loader carries its own video's
+            // licence, an unmatched one carries the last video configured.
+            FastPixDrmLog(@"handling FairPlay for %@ (licence %@, %@).",
+                          playbackId ?: @"an unidentified asset",
+                          FastPixRedact(licenseURL),
+                          matched ? @"registered for this video"
+                                  : @"NOT registered — using the last configured pair");
 
             // After the exchange this selector is the original implementation,
             // so this is a call through rather than recursion.

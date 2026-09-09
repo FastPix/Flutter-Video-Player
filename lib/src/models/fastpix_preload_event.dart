@@ -10,7 +10,7 @@ import 'fastpix_player_event_types.dart';
 /// so URL-keyed events would stop matching after a token refresh — and would
 /// stop matching *silently*, because a miss looks exactly like a cold start.
 abstract class FastPixPreloadEvent extends FastPixPlayerEvent {
-  const FastPixPreloadEvent({
+  FastPixPreloadEvent({
     required super.type,
     required super.timestamp,
     required this.playbackId,
@@ -42,7 +42,7 @@ abstract class FastPixPreloadEvent extends FastPixPlayerEvent {
 
 /// Fired when a source enters the window and warming begins.
 class FastPixPreloadStartedEvent extends FastPixPreloadEvent {
-  const FastPixPreloadStartedEvent({
+  FastPixPreloadStartedEvent({
     required super.timestamp,
     required super.playbackId,
     required super.strategy,
@@ -53,7 +53,7 @@ class FastPixPreloadStartedEvent extends FastPixPreloadEvent {
 
 /// Fired when a source is warm enough to be useful.
 class FastPixPreloadReadyEvent extends FastPixPreloadEvent {
-  const FastPixPreloadReadyEvent({
+  FastPixPreloadReadyEvent({
     required super.timestamp,
     required super.playbackId,
     required super.strategy,
@@ -75,7 +75,7 @@ class FastPixPreloadReadyEvent extends FastPixPreloadEvent {
 /// Not a playback error. The source takes the cold path and the user sees
 /// nothing; this exists so a silently ineffective warm-up is detectable.
 class FastPixPreloadFailedEvent extends FastPixPreloadEvent {
-  const FastPixPreloadFailedEvent({
+  FastPixPreloadFailedEvent({
     required super.timestamp,
     required super.playbackId,
     required super.strategy,
@@ -91,7 +91,7 @@ class FastPixPreloadFailedEvent extends FastPixPreloadEvent {
 
 /// Fired when a warmed source leaves the window before being used.
 class FastPixPreloadCancelledEvent extends FastPixPreloadEvent {
-  const FastPixPreloadCancelledEvent({
+  FastPixPreloadCancelledEvent({
     required super.timestamp,
     required super.playbackId,
     required super.strategy,
@@ -107,7 +107,7 @@ class FastPixPreloadCancelledEvent extends FastPixPreloadEvent {
 /// warming can make startup dashboards look excellent while delivering
 /// nothing; without this event the two populations cannot be told apart.
 class FastPixPreloadConsumedEvent extends FastPixPreloadEvent {
-  const FastPixPreloadConsumedEvent({
+  FastPixPreloadConsumedEvent({
     required super.timestamp,
     required super.playbackId,
     required super.strategy,

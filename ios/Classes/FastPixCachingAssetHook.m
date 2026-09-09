@@ -1,4 +1,5 @@
 #import "FastPixCachingAssetHook.h"
+#import "FastPixFairPlayPatch.h"
 #import <AVFoundation/AVFoundation.h>
 #import <objc/runtime.h>
 
@@ -89,6 +90,13 @@ static BOOL _fpHookInstalled = NO;
     // Not recursion: after the exchange this selector holds Apple's original
     // implementation.
     AVURLAsset *asset = [self fp_initWithURL:url options:options];
+
+    // This is the only moment an asset and the URL it was built from are both
+    // in hand, and `AVAssetResourceLoader` has no back-pointer to its asset.
+    // FairPlay needs that link to tell which video a resource loader belongs
+    // to; recording it here costs one associated object per asset and changes
+    // nothing about caching. See `FastPixFairPlayPatch.noteAsset:url:`.
+    [FastPixFairPlayPatch noteAsset:asset url:url];
 
     if ([url.scheme isEqualToString:FastPixSegmentPrecacher.scheme]) {
         [asset.resourceLoader

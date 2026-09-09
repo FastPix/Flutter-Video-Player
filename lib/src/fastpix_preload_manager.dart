@@ -12,6 +12,8 @@ import 'fastpix_player_configuration.dart';
 import 'models/fastpix_player_data_source.dart';
 import 'models/fastpix_player_event.dart';
 import 'utils/fastpix_network_monitor.dart';
+import 'utils/fastpix_drm_log.dart';
+import 'utils/fastpix_fairplay_bridge.dart';
 import 'utils/fastpix_warm_log.dart';
 import 'models/fastpix_preload_event.dart';
 import 'utils/fastpix_better_player_configuration.dart';
@@ -176,6 +178,11 @@ class FastPixPreloadManager {
       'preload() strategy=${strategy.name} requested=${upcoming.length} '
       'window=$window effective=$effectiveWindow warmDrm=$warmDrm',
     );
+    // The running licence total, on the line that decides the window. A count
+    // is only useful next to the decision that moved it — reading it off
+    // scattered per-licence lines means counting them by hand in a log that is
+    // mostly codec noise.
+    FastPixDrmLog.logSummary();
     if (isPlayerStrategy && window > effectiveWindow) {
       // Silent clamping is how a caller ends up believing five titles are warm
       // when one is.
@@ -269,6 +276,10 @@ class FastPixPreloadManager {
           'edge and is warm in name only';
     }
     if (source.drmEnabled && !warmDrm) {
+      FastPixDrmLog.skipped(
+        playbackId: source.playbackId,
+        reason: 'warmDrm=false',
+      );
       return 'skipped: DRM source and warmDrm=false';
     }
     return null;
@@ -465,6 +476,31 @@ class FastPixPreloadManager {
       // and emit spurious events into metrics.
       handleLifecycle: false,
     );
+
+    if (entry.source.drmEnabled) {
+      // Counted here rather than in preload(), because this is the point of no
+      // return: a warm player acquires its licence while setting up, for a
+      // video nobody has asked for yet, and pays for another one if the window
+      // moves and this entry is evicted before it is ever played.
+      FastPixDrmLog.armed(
+        playbackId: entry.source.playbackId,
+        reason: FastPixDrmLog.reasonPreload,
+        host: Uri.tryParse(
+              entry.source.drmConfiguration?.resolvedBaseUrl ?? '',
+            )?.host ??
+            '',
+      );
+    }
+
+    // Before the player is built, never after: the engine installs its
+    // resource-loader delegate during that build, and the FairPlay patch
+    // substitutes ours at that moment or not at all. Without this the warm
+    // player captures whichever video was configured last — the one currently
+    // playing — and acquires a licence that cannot decrypt the video it was
+    // warmed for. Playback then adopts it and shows a black frame.
+    //
+    // Best effort, and a no-op off iOS or on a source without FairPlay.
+    await FastPixFairPlayBridge.configure(entry.source);
 
     final factory = warmedPlayerFactory ?? _createWarmedPlayer;
     final controller = await factory(entry.source, warmConfiguration);

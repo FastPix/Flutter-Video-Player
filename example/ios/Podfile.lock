@@ -10,7 +10,7 @@ PODS:
     - Flutter
   - device_info_plus (0.0.1):
     - Flutter
-  - fastpix_video_player (1.0.1):
+  - fastpix_video_player (1.0.2):
     - Flutter
   - Flutter (1.0.0)
   - flutter_chrome_cast (1.4.1):
@@ -91,7 +91,7 @@ SPEC CHECKSUMS:
   Cache: 4ca7e00363fca5455f26534e5607634c820ffc2d
   connectivity_plus: cb623214f4e1f6ef8fe7403d580fdad517d2f7dd
   device_info_plus: 21fcca2080fbcd348be798aa36c3e5ed849eefbe
-  fastpix_video_player: 205c02b1b47cd9ae80c740df066cf2c871c5f4f5
+  fastpix_video_player: 5e9b64d18fc7a3dd55a13231571250bef4453d8b
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   flutter_chrome_cast: db3f7ddddedfb14be1836d979a2e87deeda80cf8
   GCDWebServer: 2c156a56c8226e2d5c0c3f208a3621ccffbe3ce4

@@ -18,6 +18,11 @@ FastPixPlayerConfiguration demoPlayerConfiguration() =>
       'demo-viewer',
       'metrix.ws.fastpix.io',
       controlsConfiguration: const FastPixPlayerControlsConfiguration(
+        // Headless: the app draws its own transport over a bare
+        // [FastPixVideoSurface] (see [FastPixCustomControls]). The default skin
+        // is not used anywhere, which is what removes better_player's
+        // pause-on-drag and its engine PiP button — the two Android bugs.
+        showControls: false,
         autoPlay: true,
         enableRetry: true,
         enableSkips: true,

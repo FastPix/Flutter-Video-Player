@@ -32,6 +32,33 @@ class FastPixPlayerControlsConfiguration {
 
   final bool enableSkips;
 
+  /// Whether the cast glyph is drawn before any receiver has been discovered.
+  ///
+  /// True by default: the icon sits dimmed in the controls so a viewer knows
+  /// the player can cast at all, which is how YouTube and the other large
+  /// players behave. Tapping it with nothing found still calls the host's
+  /// cast handler, so the app can explain rather than open an empty list.
+  ///
+  /// Set false for the stricter Google Cast Design Checklist behaviour, where
+  /// nothing is drawn until a receiver exists. Either way the glyph stays
+  /// hidden where casting cannot work at all.
+  final bool showCastWhenNoDevices;
+
+  /// Whether the default skin offers the playlist queue — a button that opens
+  /// the full list of items over the video, any of which can be tapped to jump
+  /// straight to it.
+  ///
+  /// Like [showPlaylistControls], it draws only when a playlist with more than
+  /// one item is set.
+  final bool showPlaylistPanel;
+
+  /// Whether the default skin shows playlist previous/next buttons.
+  ///
+  /// They are drawn only when a playlist with more than one item is set, so
+  /// leaving this on costs a single-source player nothing. Turn it off to keep
+  /// playlist navigation entirely in the host app's own chrome.
+  final bool showPlaylistControls;
+
   final bool enableRetry;
 
   /// Whether to show volume slider
@@ -66,6 +93,9 @@ class FastPixPlayerControlsConfiguration {
     this.controlsVisibility = FastPixControlsVisibility.onTap,
     this.showPlayPauseButton = true,
     this.enableSkips = false,
+    this.showPlaylistControls = true,
+    this.showPlaylistPanel = true,
+    this.showCastWhenNoDevices = true,
     this.showProgressBar = true,
     this.showTimeIndicator = true,
     this.showFullscreenButton = true,
@@ -110,6 +140,9 @@ class FastPixPlayerControlsConfiguration {
     String? progressBarBufferedColor,
     bool? autoPlay,
     bool? enableSkips,
+    bool? showPlaylistControls,
+    bool? showPlaylistPanel,
+    bool? showCastWhenNoDevices,
     bool? enableRetry
   }) {
     return FastPixPlayerControlsConfiguration(
@@ -118,6 +151,10 @@ class FastPixPlayerControlsConfiguration {
       showPlayPauseButton: showPlayPauseButton ?? this.showPlayPauseButton,
       showProgressBar: showProgressBar ?? this.showProgressBar,
       enableSkips: enableSkips ?? this.enableSkips,
+      showPlaylistControls: showPlaylistControls ?? this.showPlaylistControls,
+      showPlaylistPanel: showPlaylistPanel ?? this.showPlaylistPanel,
+      showCastWhenNoDevices:
+          showCastWhenNoDevices ?? this.showCastWhenNoDevices,
       showTimeIndicator: showTimeIndicator ?? this.showTimeIndicator,
       showFullscreenButton: showFullscreenButton ?? this.showFullscreenButton,
       showQualitySelector: showQualitySelector ?? this.showQualitySelector,

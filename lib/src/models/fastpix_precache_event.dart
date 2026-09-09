@@ -9,7 +9,7 @@ import 'fastpix_player_event_types.dart';
 /// bookkeeping stops matching after a refresh — silently, because a miss looks
 /// exactly like never having cached.
 abstract class FastPixPrecacheEvent extends FastPixPlayerEvent {
-  const FastPixPrecacheEvent({
+  FastPixPrecacheEvent({
     required super.type,
     required super.timestamp,
     required this.playbackId,
@@ -21,7 +21,7 @@ abstract class FastPixPrecacheEvent extends FastPixPlayerEvent {
 
 /// Fired when a manifest download begins.
 class FastPixPrecacheStartedEvent extends FastPixPrecacheEvent {
-  const FastPixPrecacheStartedEvent({
+  FastPixPrecacheStartedEvent({
     required super.timestamp,
     required super.playbackId,
     super.data,
@@ -36,7 +36,7 @@ class FastPixPrecacheStartedEvent extends FastPixPrecacheEvent {
 /// not anything was stored, which is how a cache that never works can look
 /// healthy indefinitely.
 class FastPixPrecacheCachedEvent extends FastPixPrecacheEvent {
-  const FastPixPrecacheCachedEvent({
+  FastPixPrecacheCachedEvent({
     required super.timestamp,
     required super.playbackId,
     required this.bytesWritten,
@@ -52,7 +52,7 @@ class FastPixPrecacheCachedEvent extends FastPixPrecacheEvent {
 /// **Never a playback failure.** The manifest is simply fetched from the
 /// network as it always has been.
 class FastPixPrecacheFailedEvent extends FastPixPrecacheEvent {
-  const FastPixPrecacheFailedEvent({
+  FastPixPrecacheFailedEvent({
     required super.timestamp,
     required super.playbackId,
     required this.status,

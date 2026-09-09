@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'cast_service.dart';
 import 'catalog.dart';
 import 'models/demo_stream.dart';
-import 'models/playback_queue.dart';
 import 'playback_config.dart';
 import 'theme.dart';
 import 'watch_screen.dart';
@@ -111,19 +110,26 @@ class _HomeScreenState extends State<HomeScreen> {
   void _open(DemoStream stream, {List<DemoStream>? items, String? title}) {
     final list = (items == null || items.isEmpty) ? _catalog.streams : items;
     final index = list.indexOf(stream);
+    // Where the viewer left this one, or null to start at the beginning.
+    final resumeFrom = _catalog.resumePositionOf(stream.playbackId);
 
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => WatchScreen(
-          queue: index < 0
-              // Not part of the list it was opened from — play it alone.
-              ? PlaybackQueue.single(stream)
-              : PlaybackQueue(
-                  title: title ?? 'All videos',
-                  items: list,
-                  index: index,
-                ),
-        ),
+        builder: (_) => index < 0
+            // Not part of the list it was opened from — play it alone.
+            ? WatchScreen(
+                title: stream.title,
+                items: <DemoStream>[stream],
+                resumeFrom: resumeFrom,
+              )
+            : WatchScreen(
+                title: title ?? 'All videos',
+                items: list,
+                // Where playback starts. The player owns the position from
+                // here on; this is the only time the app names one.
+                startIndex: index,
+                resumeFrom: resumeFrom,
+              ),
       ),
     );
   }
@@ -254,6 +260,8 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       actions: [
+        // The watch flow itself now runs the custom (headless) player, so the
+        // standalone Custom UI demo entry that used to live here is gone.
         if (canCast)
           IconButton(
             tooltip: isCasting ? 'Casting' : 'Cast',
@@ -271,8 +279,22 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// "7 min" / "1 h 12 min" — how much of the featured stream is left.
+  static String _formatRemaining(Duration remaining) {
+    if (remaining.inHours > 0) {
+      final minutes = remaining.inMinutes.remainder(60);
+      return '${remaining.inHours} h $minutes min';
+    }
+    if (remaining.inMinutes > 0) return '${remaining.inMinutes} min';
+    return '${remaining.inSeconds} s';
+  }
+
   Widget _buildHero(DemoStream stream) {
     final colors = AppColors.posterGradient(_catalog.indexOf(stream));
+    // What the banner is *for*: the thing you were last watching, and how far
+    // in you were. Null until something has been played.
+    final progress = _catalog.progressOf(stream.playbackId);
+    final canResume = progress?.isResumable ?? false;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -330,13 +352,39 @@ class _HomeScreenState extends State<HomeScreen> {
                       fontWeight: FontWeight.w800,
                     ),
                   ),
+                  if (canResume) ...[
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: LinearProgressIndicator(
+                        value: progress!.fraction,
+                        minHeight: 4,
+                        backgroundColor: Colors.white24,
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                          AppColors.accent,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '${_formatRemaining(progress.remaining)} left',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AppColors.textSecondary,
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 14),
                   Row(
                     children: [
                       FilledButton.icon(
                         onPressed: () => _open(stream),
-                        icon: const Icon(Icons.play_arrow_rounded),
-                        label: const Text('Play'),
+                        icon: Icon(
+                          canResume
+                              ? Icons.play_circle_outline_rounded
+                              : Icons.play_arrow_rounded,
+                        ),
+                        label: Text(canResume ? 'Resume' : 'Play'),
                         style: FilledButton.styleFrom(
                           backgroundColor: Colors.white,
                           foregroundColor: Colors.black,

@@ -87,6 +87,15 @@ BetterPlayerConfiguration buildBetterPlayerConfiguration({
     looping: dataSource?.loop ?? false,
     aspectRatio: 16 / 9,
     fit: BoxFit.contain,
+    // Lifecycle pausing is owned by FastPixLifecycleManager instead. The
+    // engine's version pauses on every backgrounding, including the one that
+    // follows entering Picture-in-Picture — which froze the PiP window the
+    // instant it became the only thing on screen. Ours makes the same
+    // foreground/background decision, minus that case.
+    //
+    // The 16:9 above stays as the shape used until the engine reports a size;
+    // the controller replaces it per source through setOverriddenAspectRatio.
+    handleLifecycle: false,
     controlsConfiguration: buildControlsConfiguration(controlConfiguration),
     // Set on both the warm and the playing path, and identically: this lands
     // in a final field, so a player warmed without it could never show a

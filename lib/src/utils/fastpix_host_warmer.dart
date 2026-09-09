@@ -68,8 +68,11 @@ Future<void> warmPlaybackHostsFor(
   for (final source in sources) {
     hosts.add(_originFor(source.customDomain));
     // The licence lives on a different origin, so a DRM source needs both
-    // warmed or the tap still pays one cold handshake.
-    if (source.drmEnabled) hosts.add(FastPixPlayerDrmConfiguration.drmHost);
+    // warmed or the tap still pays one cold handshake. Read from the source's
+    // own configuration, since a staging source points its licence requests at
+    // a different host than the SDK default.
+    final drm = source.drmConfiguration;
+    if (source.drmEnabled && drm != null) hosts.add(drm.resolvedBaseUrl);
   }
 
   return warmPlaybackHosts(timeout: timeout, hosts: hosts);

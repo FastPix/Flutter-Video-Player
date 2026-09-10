@@ -78,8 +78,8 @@ class FastPixPlayerDrmConfiguration {
   /// wrong environment fails in a way that reads like a bad token, so this is
   /// settable per source, alongside [FastPixPlayerDataSource.customDomain].
   ///
-  /// Give a bare host (`api.fastpix.co`) or a full origin
-  /// (`https://api.fastpix.co`); a missing scheme is filled in as `https`. The
+  /// Give a bare host (`api.fastpix.com`) or a full origin
+  /// (`https://api.fastpix.com`); a missing scheme is filled in as `https`. The
   /// `/v1/on-demand/drm` path is appended either way, so it must not be
   /// included here.
   ///

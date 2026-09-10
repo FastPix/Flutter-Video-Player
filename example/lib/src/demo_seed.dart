@@ -31,7 +31,7 @@ import 'models/demo_stream.dart';
 /// # An asset in another environment: the fifth field is the playback host and
 /// # the sixth the DRM host. Blank fields fall back to the package defaults,
 /// # so a production stream needs neither.
-/// c29dfdd1-…, DRM staging, eyJwbGF5…, eyJkcm0i…, stream.fastpix.co, api.fastpix.co
+/// c29dfdd1-…, DRM staging, eyJwbGF5…, eyJkcm0i…, stream.fastpix.com, api.fastpix.com
 /// ```
 ///
 /// Set the two hosts together. FastPix serves the manifest and the licence

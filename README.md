@@ -802,11 +802,9 @@ await controller.setPlaylistFromJson(response.body, configuration: configuration
 ```
 
 An empty list, an entry with no playback ID, unparseable JSON or a start index
-outside the list is rejected with a `FastPixPlaylistException` naming what is
-wrong and where. Rejection rather than silence: a playlist that arrives empty
-almost always means the app's own fetch or filter returned nothing, and the
-failure mode of silence is a blank player with no diagnostic. A rejected
-playlist leaves existing playback and playlist state untouched.
+outside the list is rejected with a `FastPixPlaylistException` that names what is
+wrong and where. The SDK rejects these cases rather than failing silently: a playlist that arrives empty
+almost always means the app's own fetch or filter returned nothing, and a silent failure would leave a blank player with no diagnostic. A rejected playlist leaves existing playback and playlist state untouched.
 
 ### Navigation
 
@@ -828,15 +826,13 @@ does not interrupt what is playing.
 
 `repeatMode` decides what a finished item leads to: `off` stops at the last
 item and emits `playlistEnded`, `one` replays the active item without changing
-the index, and `all` wraps from the last item back to the first. Automatic
-advance is suppressed while a Cast session is connected — the local player is
-not the surface being watched — but explicit navigation still works.
+the index, and `all` wraps from the last item back to the first. The SDK suppresses automatic advance while a Cast session is connected, because the local player is not the surface being watched — but explicit navigation still works.
 
 ### Playing a single source without a playlist
 
 `loadPlaybackId` swaps the playing source on the same controller. When the
 source is one of the playlist's items the active index moves to it and
-navigation continues from there; when it is not, it plays and the playlist
+navigation continues from there. When it is not, the source plays and the playlist
 reports no active position until the next navigation or playlist.
 
 ```dart
@@ -849,7 +845,7 @@ await controller.loadPlaybackId(
 
 With a playlist set, the SDK warms the items around the active one after each
 load, interleaved outward from the current index and preferring the item ahead
-at equal distance. `preloadRadius` is the depth either side; set it to `0` to
+at equal distance. `preloadRadius` is the depth on each side; set it to `0` to
 declare nothing and drive [preloading](#preloading-and-precaching) yourself.
 
 ```dart
@@ -859,7 +855,7 @@ controller.preloadRadius = 2; // default
 ### Watching the playlist
 
 `playlistStateStream` publishes a snapshot on every active-item change, which
-is what the bundled queue panel is built on.
+is what the bundled queue panel uses.
 
 ```dart
 StreamBuilder<FastPixPlaylistState>(
@@ -872,11 +868,11 @@ StreamBuilder<FastPixPlaylistState>(
 );
 ```
 
-The event bus carries the same news as discrete events: `playlistChanged`,
+The event bus carries the same updates as discrete events: `playlistChanged`,
 `playlistItemChanged` (with the index it left, the index it moved to, the
-playback ID and why) and `playlistEnded`. Every ordinary playback event now
+playback ID and why) and `playlistEnded`. Every ordinary playback event 
 also carries `playbackId` and, when a playlist is set, `playlistIndex` in its
-`data` map, so an event log says which item it describes.
+`data` map, so an event log shows which item it describes.
 
 ### The queue panel
 
@@ -891,10 +887,10 @@ FastPixPlaylistPanel(
 The panel draws itself from the controller alone, so there is no second ordered
 list to keep in step with what is playing. The bundled skin opens it from the
 control bar; `showPlaylistPanel` and `showPlaylistControls` on
-`FastPixPlayerControlsConfiguration` turn the panel and the previous/next arrows
+`FastPixPlayerControlsConfiguration` turn the panel and the previous and next arrows
 off.
 
-## Skip segments
+## Skip segments 
 
 An item can declare the ranges a viewer usually skips. The player reports when
 playback enters one and offers `skipCurrentSegment()` to jump to its end.
@@ -927,20 +923,19 @@ controller.addEventListener(FastPixPlayerEventTypes.skipHidden, (_) => hideSkipB
 await controller.skipCurrentSegment(); // false when nothing is active
 ```
 
-Segments are held until the item's duration is known and validated once at that
+The SDK holds segments until the item's duration is known, then validates then once at that
 point, because two of the four rules — a start at or beyond the duration, an end
 beyond it — need a duration that does not exist when the playlist is supplied.
-An invalid segment is rejected on its own with a `skipFailed` event naming the
-reason; its valid siblings keep working. On a live source, where the duration
-never settles, segments stay pending: no skip is offered and no failure is
-reported.
+The SDK rejects an invalid segments on its own with a `skipFailed` event that names the reason, and
+its valid siblings keep working. On a live source, where the duration
+never settles, segments stay pending: the SDK offers no skip and reports no failure.
 
 `enableSkips` on `FastPixPlayerControlsConfiguration` draws the skip button in
 the bundled skin. A custom UI listens for the events instead.
 
 ## Picture-in-Picture
 
-`controller.pip` drives the PiP window on both platforms over the SDK's own
+`controller.pip` drives the Picture-in-Picture(PiP) window on both platforms over the SDK's own
 platform channel, so PiP never routes through the engine's fullscreen path.
 
 ```dart
@@ -960,8 +955,8 @@ controller.addEventListener(FastPixPlayerEventTypes.pipChanged, (event) {
 
 PiP survives a playlist advance, and captions scale to the window rather than
 rendering at full-player size inside it. Supply the window's content with
-`pipBuilder` on `FastPixPlayer` or `FastPixVideoSurface`; without one the
-bundled `fastPixDefaultPipLayout` is used.
+`pipBuilder` on `FastPixPlayer` or `FastPixVideoSurface`; the SDK uses the
+bundled `fastPixDefaultPipLayout`.
 
 ### Picture-in-Picture platform setup
 
@@ -1042,19 +1037,19 @@ controller.toggleFullscreen();
 await controller.toggleCast();
 ```
 
-Quality selection is a ceiling rather than an exact pick on both platforms — the
+Quality selection is a ceiling rather than an exact selection on both platforms: the
 player still adapts below the level you set.
 
 Track lists arrive with the manifest, not at initialization. Listen for
 `qualityLevelsReady`, `audioTracksReady` and `subtitleTracksReady` to populate
-menus at the moment there is something to put in them, and for
+menus when there is something to put in them, and for
 `qualityLevelChanged`, `audioTrackChanged`, `subtitleChanged`,
 `playbackRateChanged`, `scrubStarted` and `scrubEnded` to follow the state.
 
 Failures from these calls do not throw. They arrive on the playback error
 channel the app already listens to, carrying a `FastPixCustomUIErrorCode`:
 `trackUnavailable`, `trackSwitchFailed`, `qualitySelectionUnsupported`,
-`playbackRateUnsupported`, `castUnavailable`, `playerNotReady`, `pipUnsupported`
+`playbackRateUnsupported`, `castUnavailable`, `playerNotReady`, `pipUnsupported`,
 or `pipFailed`.
 
 ## Custom Domain

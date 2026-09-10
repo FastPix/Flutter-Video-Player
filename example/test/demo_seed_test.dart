@@ -122,10 +122,10 @@ void main() {
         // here: FastPix DRM media is always private.
         expect(stream.token, isNotNull, reason: '${stream.title} has no token');
         // The manifest and the licence must agree on an environment.
-        final manifestIsStaging = source.url.contains('fastpix.co/');
+        final manifestIsStaging = source.url.contains('fastpix.com/');
         final licenceIsStaging = source.drmConfiguration!
             .resolvedBaseUrl
-            .contains('fastpix.co/');
+            .contains('fastpix.com/');
         expect(manifestIsStaging, licenceIsStaging,
             reason: '${stream.title} mixes environments');
       }
@@ -135,7 +135,7 @@ void main() {
       // The file is meant to be annotated — which entry expires when, which
       // one is a known-bad asset — and a comment must not become a stream.
       final streams = DemoSeed.parse(
-        '# a note\n\n$idA, Real, tok, lic, stream.fastpix.co, api.fastpix.co\n'
+        '# a note\n\n$idA, Real, tok, lic, stream.fastpix.com, api.fastpix.com\n'
         '# 72dd0ebb-…, disabled for now\n',
       );
       expect(streams, hasLength(1));
@@ -190,17 +190,17 @@ void main() {
       // fails on the production DRM host — two different origins, both wrong,
       // so both are seedable.
       final stream = DemoSeed.parse(
-        '$idA, DRM staging, tok, lic, stream.fastpix.co, api.fastpix.co\n',
+        '$idA, DRM staging, tok, lic, stream.fastpix.com, api.fastpix.com\n',
       ).single;
 
-      expect(stream.streamHost, 'stream.fastpix.co');
-      expect(stream.drmHost, 'api.fastpix.co');
+      expect(stream.streamHost, 'stream.fastpix.com');
+      expect(stream.drmHost, 'api.fastpix.com');
 
       final source = stream.toDataSource();
-      expect(source.url, startsWith('https://stream.fastpix.co/'));
+      expect(source.url, startsWith('https://stream.fastpix.com/'));
       expect(
         source.drmConfiguration!.licenseUrl(idA),
-        startsWith('https://api.fastpix.co/'),
+        startsWith('https://api.fastpix.com/'),
       );
     });
 

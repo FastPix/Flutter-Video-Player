@@ -34,7 +34,7 @@ void main() {
         drmConfiguration: const FastPixPlayerDrmConfiguration(
           drmToken: 'licence-token',
           drmType: FastPixDrmType.fairplay,
-          customDomain: 'api.fastpix.co',
+          customDomain: 'api.fastpix.com',
         ),
       );
 

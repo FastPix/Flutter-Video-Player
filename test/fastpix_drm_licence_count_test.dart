@@ -21,7 +21,7 @@ void main() {
     drmConfiguration: const FastPixPlayerDrmConfiguration(
       drmToken: 'licence-token',
       drmType: FastPixDrmType.widevine,
-      customDomain: 'api.fastpix.co',
+      customDomain: 'api.fastpix.com',
     ),
   );
 

@@ -71,21 +71,50 @@ class FastPixPlayerDrmConfiguration {
   /// recordings without anything being asked of the app.
   final bool secureScreen;
 
+  /// Host serving the DRM endpoints, or null for the FastPix default.
+  ///
+  /// FastPix runs more than one environment, and an account's media — with its
+  /// licences — lives in exactly one of them. A licence request sent to the
+  /// wrong environment fails in a way that reads like a bad token, so this is
+  /// settable per source, alongside [FastPixPlayerDataSource.customDomain].
+  ///
+  /// Give a bare host (`api.fastpix.com`) or a full origin
+  /// (`https://api.fastpix.com`); a missing scheme is filled in as `https`. The
+  /// `/v1/on-demand/drm` path is appended either way, so it must not be
+  /// included here.
+  ///
+  /// Set this together with the data source's `customDomain`: the stream and
+  /// its licence come from the same environment, and pairing a staging
+  /// manifest with a production licence server fails at the handshake.
+  final String? customDomain;
+
   /// Base URL of the FastPix DRM endpoints
   static const String _drmBaseUrl = 'https://api.fastpix.com/v1/on-demand/drm';
 
-  /// Origin the licence and certificate URLs are built on.
+  /// Origin the licence and certificate URLs are built on **by default**.
   ///
   /// Exposed so `warmPlaybackHosts()` warms the host the DRM handshake will
   /// actually contact. Worth warming on its own account: licence acquisition
   /// is the single largest fixed item on the tap path for protected content.
+  ///
+  /// A configuration carrying a [customDomain] does not use this — use
+  /// [resolvedBaseUrl] for the host a specific source will contact.
   static const String drmHost = _drmBaseUrl;
+
+  /// Base URL this configuration's licence and certificate URLs are built on.
+  String get resolvedBaseUrl {
+    final domain = customDomain?.trim();
+    if (domain == null || domain.isEmpty) return _drmBaseUrl;
+    final origin = domain.startsWith('http') ? domain : 'https://$domain';
+    return '${origin.replaceAll(RegExp(r'/+$'), '')}/v1/on-demand/drm';
+  }
 
   const FastPixPlayerDrmConfiguration({
     required this.drmToken,
     this.drmType,
     this.headers,
     this.secureScreen = true,
+    this.customDomain,
   });
 
   /// DRM system for the current platform, honouring an explicit [drmType]
@@ -140,7 +169,7 @@ class FastPixPlayerDrmConfiguration {
 
   /// License server URL for [playbackId]
   String licenseUrl(String playbackId) =>
-      '$_drmBaseUrl/license/${resolvedDrmType.value}/$playbackId'
+      '$resolvedBaseUrl/license/${resolvedDrmType.value}/$playbackId'
       '?token=${Uri.encodeQueryComponent(drmToken)}';
 
   /// FairPlay application certificate URL for [playbackId].
@@ -148,7 +177,7 @@ class FastPixPlayerDrmConfiguration {
   /// Returns `null` for DRM systems that do not use a certificate.
   String? certificateUrl(String playbackId) =>
       resolvedDrmType == FastPixDrmType.fairplay
-          ? '$_drmBaseUrl/cert/fairplay/$playbackId'
+          ? '$resolvedBaseUrl/cert/fairplay/$playbackId'
               '?token=${Uri.encodeQueryComponent(drmToken)}'
           : null;
 
@@ -173,12 +202,14 @@ class FastPixPlayerDrmConfiguration {
     FastPixDrmType? drmType,
     Map<String, String>? headers,
     bool? secureScreen,
+    String? customDomain,
   }) {
     return FastPixPlayerDrmConfiguration(
       drmToken: drmToken ?? this.drmToken,
       drmType: drmType ?? this.drmType,
       headers: headers ?? this.headers,
       secureScreen: secureScreen ?? this.secureScreen,
+      customDomain: customDomain ?? this.customDomain,
     );
   }
 }

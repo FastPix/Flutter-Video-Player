@@ -39,12 +39,46 @@ export 'src/utils/fastpix_better_player_configuration.dart';
 export 'src/utils/fastpix_host_warmer.dart';
 export 'src/utils/fastpix_playstart_trace.dart';
 export 'src/utils/fastpix_warm_log.dart';
+export 'src/utils/fastpix_drm_log.dart';
+export 'src/utils/fastpix_user_leave_hint.dart';
 
 // Precache exports
 export 'src/fastpix_precache_manager.dart';
 export 'src/enums/fastpix_precache_status.dart';
 export 'src/models/fastpix_precache_event.dart';
 
+// Playlist exports
+export 'src/managers/fastpix_playlist_manager.dart';
+export 'src/managers/fastpix_skip_manager.dart';
+export 'src/models/fastpix_playlist_state.dart';
+export 'src/models/fastpix_playlist_exception.dart';
+export 'src/models/fastpix_skip_segment.dart';
+export 'src/models/fastpix_playlist_event.dart';
+export 'src/enums/fastpix_playlist_repeat_mode.dart';
+export 'src/enums/fastpix_playlist_item_change_reason.dart';
+export 'src/enums/fastpix_skip_type.dart';
+export 'src/enums/fastpix_skip_failure_reason.dart';
+
 // Event listener exports
 export 'src/models/fastpix_player_event.dart';
 export 'src/models/fastpix_player_event_types.dart';
+
+// Custom UI mechanism exports (additive — headless surface + functionality API)
+export 'src/widgets/fastpix_video_surface.dart';
+// `FastPixPipBuilder` and the default layout, so a host can supply its own
+// Picture-in-Picture window content.
+export 'src/widgets/fastpix_pip_layout.dart';
+export 'src/widgets/fastpix_playlist_panel.dart';
+export 'src/models/fastpix_playback_state.dart';
+export 'src/models/fastpix_quality_level.dart';
+export 'src/models/fastpix_audio_track.dart';
+export 'src/models/fastpix_subtitle_track.dart';
+export 'src/models/fastpix_custom_ui_event.dart';
+export 'src/enums/fastpix_custom_ui_error_code.dart';
+export 'src/managers/fastpix_engine_accessor.dart';
+export 'src/managers/fastpix_playback_rate_manager.dart';
+export 'src/managers/fastpix_scrub_controller.dart';
+export 'src/managers/fastpix_quality_manager.dart';
+export 'src/managers/fastpix_audio_track_manager.dart';
+export 'src/managers/fastpix_subtitle_track_manager.dart';
+export 'src/managers/fastpix_pip_manager.dart';

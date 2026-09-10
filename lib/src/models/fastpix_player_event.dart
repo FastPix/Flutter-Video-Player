@@ -10,14 +10,31 @@ abstract class FastPixPlayerEvent {
   /// Timestamp when the event occurred
   final DateTime timestamp;
 
-  /// Additional event data
-  final Map<String, dynamic>? data;
+  /// Additional event data.
+  ///
+  /// Carries the item this event describes once it has been emitted: every
+  /// event the player emits gains a `playbackId`, and, while a playlist is
+  /// set, the `playlistIndex` of the item — see [attachAttribution]. Without
+  /// it a playlist's event log cannot say which video a `pause` or an `error`
+  /// belongs to.
+  Map<String, dynamic>? data;
 
-  const FastPixPlayerEvent({
+  FastPixPlayerEvent({
     required this.type,
     required this.timestamp,
     this.data,
   });
+
+  /// Merge item attribution into [data], as the event is emitted.
+  ///
+  /// Called once, from the single emission point, rather than at each of the
+  /// several dozen construction sites: one place to get right, one to test.
+  /// Existing keys win, so an event that already said something about itself
+  /// is never overwritten.
+  void attachAttribution(Map<String, dynamic> attribution) {
+    if (attribution.isEmpty) return;
+    data = <String, dynamic>{...attribution, ...?data};
+  }
 
   @override
   String toString() =>
@@ -26,49 +43,49 @@ abstract class FastPixPlayerEvent {
 
 /// Play event - fired when video starts playing
 class FastPixPlayerPlayEvent extends FastPixPlayerEvent {
-  const FastPixPlayerPlayEvent({required super.timestamp, super.data})
+  FastPixPlayerPlayEvent({required super.timestamp, super.data})
     : super(type: 'play');
 }
 
 /// Pause event - fired when video is paused
 class FastPixPlayerPauseEvent extends FastPixPlayerEvent {
-  const FastPixPlayerPauseEvent({required super.timestamp, super.data})
+  FastPixPlayerPauseEvent({required super.timestamp, super.data})
     : super(type: 'pause');
 }
 
 /// Playing event - fired during video playback
 class FastPixPlayerPlayingEvent extends FastPixPlayerEvent {
-  const FastPixPlayerPlayingEvent({required super.timestamp, super.data})
+  FastPixPlayerPlayingEvent({required super.timestamp, super.data})
     : super(type: 'playing');
 }
 
 /// Buffering event - fired when video is buffering
 class FastPixPlayerBufferingEvent extends FastPixPlayerEvent {
-  const FastPixPlayerBufferingEvent({required super.timestamp, super.data})
+  FastPixPlayerBufferingEvent({required super.timestamp, super.data})
     : super(type: 'buffering');
 }
 
 /// Buffered event - fired when buffering is complete
 class FastPixPlayerBufferedEvent extends FastPixPlayerEvent {
-  const FastPixPlayerBufferedEvent({required super.timestamp, super.data})
+  FastPixPlayerBufferedEvent({required super.timestamp, super.data})
     : super(type: 'buffered');
 }
 
 /// Seeking event - fired when seeking starts
 class FastPixPlayerSeekingEvent extends FastPixPlayerEvent {
-  const FastPixPlayerSeekingEvent({required super.timestamp, super.data})
+  FastPixPlayerSeekingEvent({required super.timestamp, super.data})
     : super(type: 'seeking');
 }
 
 /// Seeked event - fired when seeking is complete
 class FastPixPlayerSeekedEvent extends FastPixPlayerEvent {
-  const FastPixPlayerSeekedEvent({required super.timestamp, super.data})
+  FastPixPlayerSeekedEvent({required super.timestamp, super.data})
     : super(type: 'seeked');
 }
 
 /// Finished event - fired when video playback is complete
 class FastPixPlayerFinishedEvent extends FastPixPlayerEvent {
-  const FastPixPlayerFinishedEvent({required super.timestamp, super.data})
+  FastPixPlayerFinishedEvent({required super.timestamp, super.data})
     : super(type: 'finished');
 }
 
@@ -80,7 +97,7 @@ class FastPixPlayerErrorEvent extends FastPixPlayerEvent {
   /// Error code
   final String? code;
 
-  const FastPixPlayerErrorEvent({
+  FastPixPlayerErrorEvent({
     required super.timestamp,
     required this.message,
     this.code,
@@ -145,7 +162,7 @@ class FastPixPlayerQualityChangedEvent extends FastPixPlayerEvent {
   /// New quality attributes
   final Map<String, String> qualityAttributes;
 
-  const FastPixPlayerQualityChangedEvent({
+  FastPixPlayerQualityChangedEvent({
     required super.timestamp,
     required this.qualityAttributes,
     super.data,
@@ -157,7 +174,7 @@ class FastPixPlayerDurationChangedEvent extends FastPixPlayerEvent {
   /// Video duration in milliseconds
   final int duration;
 
-  const FastPixPlayerDurationChangedEvent({
+  FastPixPlayerDurationChangedEvent({
     required super.timestamp,
     required this.duration,
     super.data,
@@ -172,7 +189,7 @@ class FastPixPlayerPositionChangedEvent extends FastPixPlayerEvent {
   /// Total duration in milliseconds
   final int duration;
 
-  const FastPixPlayerPositionChangedEvent({
+  FastPixPlayerPositionChangedEvent({
     required super.timestamp,
     required this.position,
     required this.duration,
@@ -185,7 +202,7 @@ class FastPixPlayerVolumeChangedEvent extends FastPixPlayerEvent {
   /// New volume level (0.0 to 1.0)
   final double volume;
 
-  const FastPixPlayerVolumeChangedEvent({
+  FastPixPlayerVolumeChangedEvent({
     required super.timestamp,
     required this.volume,
     super.data,
@@ -197,7 +214,7 @@ class FastPixPlayerFullscreenChangedEvent extends FastPixPlayerEvent {
   /// Whether fullscreen is enabled
   final bool isFullscreen;
 
-  const FastPixPlayerFullscreenChangedEvent({
+  FastPixPlayerFullscreenChangedEvent({
     required super.timestamp,
     required this.isFullscreen,
     super.data,
@@ -206,7 +223,7 @@ class FastPixPlayerFullscreenChangedEvent extends FastPixPlayerEvent {
 
 /// Ready event - fired when player is ready to play
 class FastPixPlayerReadyEvent extends FastPixPlayerEvent {
-  const FastPixPlayerReadyEvent({required super.timestamp, super.data})
+  FastPixPlayerReadyEvent({required super.timestamp, super.data})
     : super(type: 'ready');
 }
 
@@ -218,7 +235,7 @@ class FastPixPlayerStateChangedEvent extends FastPixPlayerEvent {
   /// New state
   final String newState;
 
-  const FastPixPlayerStateChangedEvent({
+  FastPixPlayerStateChangedEvent({
     required super.timestamp,
     required this.previousState,
     required this.newState,
@@ -268,8 +285,18 @@ class FastPixPlayerEventManager {
     _globalListeners.clear();
   }
 
+  /// Supplies the item attribution attached to every emitted event.
+  ///
+  /// Set by [FastPixPlayerController] so that events raised by the managers —
+  /// which hold no playlist of their own — are attributed exactly like the
+  /// ones the controller raises itself.
+  Map<String, dynamic>? Function()? attributionProvider;
+
   /// Emit an event to all registered listeners
   void emit(FastPixPlayerEvent event) {
+    final attribution = attributionProvider?.call();
+    if (attribution != null) event.attachAttribution(attribution);
+
     // Emit to specific event listeners
     final eventListeners = _listeners[event.type];
     if (eventListeners != null) {

@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.1.2]
+
+### Added
+- **Playlists**: `setPlaylist(items, {startIndex, configuration})` and `setPlaylistFromJson(json, ...)` play an ordered list on one controller
+- **Navigation**: `next()`, `previous()`, `jumpTo(index)`, each reporting whether the index moved, plus `clearPlaylist()`, the index getters, `playlistState` and `playlistStateStream`
+- **Autoplay and repeat**: `autoPlayNext` (default `false`) and `repeatMode` (`off` / `one` / `all`, default `off`), independent of `FastPixPlayerDataSource.loop`
+- **Playlist validation**: `FastPixPlaylistException` with a `FastPixPlaylistErrorCode` and the offending `itemIndex`. A rejected playlist changes nothing
+- **Source switching**: `loadPlaybackId(source)` replaces the playing source, disposing the outgoing engine player, recycling the metrics session and reopening the analytics sequence
+- **Preload windowing**: playlist neighbours are warmed after each load, `preloadRadius` deep (default `2`, `0` disables)
+- **Skip segments**: `skipSegments` on the data source, with `activeSkipSegment`, `skipCurrentSegment()` and the `skipAvailable` / `skipHidden` events
+- **Skip validation**: once per source, at the first usable duration. A rejected segment emits `skipFailed` and leaves its siblings active
+- **Data source**: `skipSegments`, `startAt`, `endAt` and `fromJson`
+- **Custom UI**: `FastPixVideoSurface` draws video alone. The controller adds `playbackStateStream`, `togglePlayPause()`, `seekForward()` / `seekBackward()`, scrub, `setPlaybackRate()`, and quality, audio and subtitle selection. Failures reach the error channel as a `FastPixCustomUIErrorCode` instead of throwing
+- **Picture-in-Picture**: `controller.pip` — `enterPip()`, `exitPip()`, `togglePip()`, `isPipAvailable()`, `isPipActive`, `enabled`, `autoEnterOnBackground`, `setPipAudioBehavior()` — plus `FastPixPipChangedEvent` and `pipBuilder`. Needs `android:supportsPictureInPicture` and the iOS `audio` background mode
+- **Playlist panel**: `FastPixPlaylistPanel`, the queue the bundled skin opens
+- **Event types**: `playlistChanged`, `playlistItemChanged`, `playlistEnded`, `skipAvailable`, `skipHidden`, `skipCompleted`, `skipFailed`, `playbackRateChanged`, `scrubStarted`, `scrubEnded`, `qualityLevelsReady`, `qualityLevelChanged`, `audioTracksReady`, `audioTrackChanged`, `subtitleTracksReady`, `subtitleChanged`, `pipChanged`
+- **Controls configuration**: `enableSkips` (default `false`), `showPlaylistControls`, `showPlaylistPanel`, `showCastWhenNoDevices`
+- **`sourceGeneration`**: a `ValueListenable<int>`, incremented once per source load
+
+### Changed
+- Every playback event carries `playbackId`, and `playlistIndex` when a playlist is set. Nothing existing changed
+- `FastPixPlayer` and `FastPixVideoSurface` re-read the engine player on `sourceGeneration` instead of latching it at mount
+- The cast glyph shows before discovery finds a receiver, governed by `showCastWhenNoDevices`
+- Picture-in-Picture survives a playlist advance
+- Captions are scaled to the Picture-in-Picture window
+- Automatic advance is suppressed while casting; explicit navigation still works
+- `dispose()` releases the playlist, so no advance, warm or event follows it
+
+
 ## [1.0.2]
 
 ### Added

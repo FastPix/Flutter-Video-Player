@@ -1,11 +1,18 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
+
 import 'package:better_player_plus/better_player_plus.dart';
+import 'package:flutter/material.dart';
 import 'fastpix_cast_button.dart';
 import 'fastpix_cast_controller.dart';
 import 'fastpix_player_controller.dart';
 import 'models/fastpix_player_drm_error.dart';
 import 'models/fastpix_player_event.dart';
+import 'models/fastpix_player_controls_configuration.dart';
 import 'models/fastpix_player_event_types.dart';
+import 'models/fastpix_playlist_state.dart';
+import 'widgets/fastpix_pip_layout.dart';
+import 'widgets/fastpix_playlist_panel.dart';
+import 'utils/fastpix_video_size_watcher.dart';
 import 'utils/fastpix_playback_diagnostics.dart';
 
 /// Main FastPix Player widget
@@ -98,7 +105,17 @@ class FastPixPlayer extends StatefulWidget {
     this.castController,
     this.onCastPressed,
     this.castOverlayBuilder,
+    this.pipBuilder,
   });
+
+  /// What the Picture-in-Picture window shows while one is open.
+  ///
+  /// Defaults to [fastPixDefaultPipLayout] — the bare video, with none of this
+  /// widget's own chrome. Supply a builder to put something else there; the
+  /// video widget it is handed must appear in the tree it returns, or the
+  /// engine controller is disposed and the playback the window is showing
+  /// ends.
+  final FastPixPipBuilder? pipBuilder;
 
   @override
   State<FastPixPlayer> createState() => _FastPixPlayerState();
@@ -106,6 +123,31 @@ class FastPixPlayer extends StatefulWidget {
 
 class _FastPixPlayerState extends State<FastPixPlayer> {
   BetterPlayerController? _betterPlayerController;
+
+  /// Rebuilds this widget when the engine reports a new video size, so the
+  /// engine's own `FittedBox` re-reads it. Without that, a source change on
+  /// Android leaves the new video fitted to the previous one's dimensions.
+  late final FastPixVideoSizeWatcher _videoSize;
+
+  /// Whether a PiP window is showing this playback.
+  ///
+  /// While it is, this widget renders [FastPixPlayer.pipBuilder] instead of its
+  /// page layout, so the window shows the video and not the whole app. That
+  /// matters most on Android, where the system resizes the entire activity into
+  /// the PiP rectangle.
+  bool _pipActive = false;
+
+  /// Keeps the player the *same element* across a Picture-in-Picture
+  /// transition. Entering PiP replaces this widget's layout, and a re-parented
+  /// subtree without a `GlobalKey` is unmounted and rebuilt — which for
+  /// `BetterPlayer` means disposing the engine controller and ending the
+  /// playback the window is showing.
+  final GlobalKey _playerKey = GlobalKey();
+
+  /// How large the player was drawn while it was still on the page, so a PiP
+  /// window can render a scaled copy of it. See [fastPixPipVideoBox].
+  final FastPixInlinePlayerSize _inlineSize = FastPixInlinePlayerSize();
+
   bool _isInitialized = false;
   FastPixPlayerErrorEvent? _error;
   FastPixPlaybackDiagnosis? _diagnosis;
@@ -114,6 +156,12 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
   @override
   void initState() {
     super.initState();
+    _videoSize = FastPixVideoSizeWatcher(_onVideoSizeChanged);
+    _pipActive = widget.controller.pip.isPipActiveOrPending;
+    widget.controller.addEventListener(
+      FastPixPlayerEventTypes.pipChanged,
+      _onPipChanged,
+    );
     // Playback can fail at any point (an expiring DRM license, a dropped
     // connection), so the error state is driven by the event stream rather
     // than only by the initial wait.
@@ -121,7 +169,37 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
       FastPixPlayerEventTypes.error,
       _onErrorEvent,
     );
+    // The controller can replace the source it is playing without this widget
+    // being rebuilt and without being handed a different controller — a
+    // playlist advance does exactly that. Without this the widget keeps
+    // rendering the engine player it latched at mount, which by then has been
+    // released.
+    widget.controller.sourceGeneration.addListener(_onSourceChanged);
     _initializeController();
+  }
+
+  /// Re-read the engine player after the controller changed source.
+  void _onSourceChanged() {
+    if (!mounted) return;
+    setState(() {
+      // A new source is a new attempt: the previous source's failure must not
+      // keep the error state on screen over video that is playing.
+      _error = null;
+      _diagnosis = null;
+      _diagnosing = false;
+      _betterPlayerController = widget.controller.betterPlayerController;
+      _isInitialized = _betterPlayerController != null;
+    });
+    _videoSize.watch(_betterPlayerController);
+  }
+
+  void _onVideoSizeChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onPipChanged(FastPixPlayerEvent _) {
+    if (!mounted) return;
+    setState(() => _pipActive = widget.controller.pip.isPipActiveOrPending);
   }
 
   @override
@@ -141,7 +219,18 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
       FastPixPlayerEventTypes.error,
       _onErrorEvent,
     );
+    oldWidget.controller.removeEventListener(
+      FastPixPlayerEventTypes.pipChanged,
+      _onPipChanged,
+    );
+    widget.controller.addEventListener(
+      FastPixPlayerEventTypes.pipChanged,
+      _onPipChanged,
+    );
+    oldWidget.controller.sourceGeneration.removeListener(_onSourceChanged);
+    widget.controller.sourceGeneration.addListener(_onSourceChanged);
     oldWidget.controller.fullscreenOverlayBuilder = null;
+    _videoSize.watch(null);
     setState(() {
       _error = null;
       _diagnosis = null;
@@ -158,7 +247,13 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
       FastPixPlayerEventTypes.error,
       _onErrorEvent,
     );
+    widget.controller.removeEventListener(
+      FastPixPlayerEventTypes.pipChanged,
+      _onPipChanged,
+    );
+    widget.controller.sourceGeneration.removeListener(_onSourceChanged);
     widget.controller.fullscreenOverlayBuilder = null;
+    _videoSize.dispose();
     super.dispose();
   }
 
@@ -200,6 +295,7 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     // Let the cast button follow the player into fullscreen, which is a route
     // of better_player's own making that this widget's tree never reaches.
     widget.controller.fullscreenOverlayBuilder = _wrapForFullscreen;
+    _videoSize.watch(_betterPlayerController);
     setState(() {
       _isInitialized = true;
     });
@@ -359,17 +455,57 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     // slot, and Flutter answers that by unmounting the old element — whose
     // dispose calls BetterPlayerController.dispose(), tearing down playback
     // mid-session. A constant shape costs nothing and cannot do that.
+    final Widget video =
+        BetterPlayer(key: _playerKey, controller: _betterPlayerController!);
+
+    // A PiP window shows the video alone. On Android the window IS this tree —
+    // the system resizes the whole activity — so the page layout below
+    // (overlays, playlist rail, top bar) would be drawn into a thumbnail
+    // unless it is replaced. On iOS the window is a separate system surface
+    // and this page carries on unchanged. See
+    // [fastPixHostTreeBecomesPipWindow].
+    //
+    // An opaque cover used to be composited over the video here instead. That
+    // existed only because the engine's iOS PiP added a *second* AVPlayerLayer
+    // on the same player and handed that one to AVKit, leaving this one still
+    // drawing the same video. The SDK owns PiP natively now and attaches it to
+    // this layer, so there is no second one and nothing to hide.
+    // Pending counts, not just confirmed. Android resizes the window — and so
+    // rebuilds this tree — *before* the platform reports the window open, so a
+    // build gated on the confirmed flag lays the full page out at ~192x108
+    // first. That layout throws (`BoxConstraints forces an infinite height`, a
+    // failed `Stack` assertion, an overflowing `RenderFlex`) and a tree that
+    // throws during layout paints nothing: the black PiP window.
+    if (_pipActive && fastPixHostTreeBecomesPipWindow) {
+      final build = widget.pipBuilder ?? fastPixDefaultPipLayout;
+      // Scaled here rather than inside the default layout so a host that
+      // supplies its own `pipBuilder` gets the same captions too.
+      return build(
+        context,
+        fastPixPipVideoBox(
+          context,
+          video,
+          inlinePlayerSize: _inlineSize.value,
+        ),
+      );
+    }
+
+    // Records the size the player is drawn at here, for the PiP branch above to
+    // scale down from. Sampled from the inline path because that is the only
+    // place the inline layout exists.
+    _inlineSize.sampleAfterFrame(_playerKey, () => !_pipActive);
+
     final Widget videoSurface = Stack(
       fit: StackFit.expand,
       children: [
-        BetterPlayer(controller: _betterPlayerController!),
-        _buildCastOverlay(),
+        video,
+        _buildPlaylistOverlay(),
+        _buildTopBarOverlay(),
       ],
     );
 
     Widget playerWidget = AspectRatio(
-      aspectRatio:
-          16 / 9, // Default 16:9 aspect ratio - could be made configurable
+      aspectRatio: 16 / 9,
       child: videoSurface,
     );
 
@@ -394,28 +530,80 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     return playerWidget;
   }
 
-  /// The cast button, sitting in the player's top control bar.
+  /// Whether the playlist controls could ever draw for this player.
   ///
-  /// Aligned to the top-right, so it reads as one row with better_player's own
-  /// top-bar buttons rather than as something pasted on top.
-  Widget _buildCastOverlay() {
-    final castController = widget.castController;
-    if (castController == null) return const SizedBox.shrink();
+  /// A cheap gate for the fullscreen wrap: it says the configuration allows
+  /// them, not that a playlist is currently set — that second question is the
+  /// overlay's own, and it answers it live from the playlist state stream.
+  bool get _playlistControlsPossible {
+    final controls = widget.controller.configuration?.controlsConfiguration;
+    if (controls == null) return true;
+    return controls.showPlaylistControls || controls.showPlaylistPanel;
+  }
+
+  /// Whether the queue is open over the video.
+  ///
+  /// Held here rather than inside the overlay because the button that opens it
+  /// lives in the top bar and the panel it opens is drawn over the middle of
+  /// the player — two different subtrees, and in fullscreen two different
+  /// routes.
+  bool _panelOpen = false;
+
+  void _openPanel() {
+    if (!mounted) return;
+    setState(() => _panelOpen = true);
+    // The controls' own hide timer keeps running behind the panel; nudging it
+    // means they are still there when the queue closes.
+    _betterPlayerController?.setControlsVisibility(true);
+  }
+
+  void _closePanel() {
+    if (!mounted) return;
+    setState(() => _panelOpen = false);
+  }
+
+  /// Playlist previous/next and the queue panel, over the middle of the player.
+  ///
+  /// Drawn for both the inline player and the engine's fullscreen route (see
+  /// [_wrapForFullscreen]) so playlist navigation does not disappear the moment
+  /// the viewer goes fullscreen.
+  Widget _buildPlaylistOverlay() {
+    final player = _betterPlayerController;
+    if (player == null) return const SizedBox.shrink();
+    return _PlaylistNavOverlay(
+      player: player,
+      controller: widget.controller,
+      panelOpen: _panelOpen,
+      onClosePanel: _closePanel,
+    );
+  }
+
+  /// The player's top-right control row: the playlist queue button, then the
+  /// cast glyph, then blank space matching better_player's own top-bar buttons.
+  ///
+  /// One row rather than several overlays, because they share a corner. The
+  /// left-hand side of the player is not an option: in portrait that is where
+  /// the host's back chevron sits.
+  Widget _buildTopBarOverlay() {
+    final player = _betterPlayerController;
+    if (player == null) return const SizedBox.shrink();
 
     return Align(
       alignment: Alignment.topRight,
       // No SafeArea: better_player's own top bar has none either, and adding
-      // one here would push the cast glyph out of line with it.
-      child: _CastControlBarButton(
-        player: _betterPlayerController!,
-        castController: castController,
-        onPressed: widget.onCastPressed,
+      // one here would push these glyphs out of line with it.
+      child: _TopBarControls(
+        player: player,
+        controller: widget.controller,
+        castController: widget.castController,
+        onCastPressed: widget.onCastPressed,
+        onPlaylistPressed: _openPanel,
       ),
     );
   }
 
-  /// Put the cast button back over the player once better_player has moved it
-  /// into its own fullscreen route.
+  /// Put the cast button and the playlist controls back over the player once
+  /// better_player has moved it into its own fullscreen route.
   ///
   /// `Positioned` rather than `Align`, so the [Stack] takes its size from the
   /// player and the button lands on the player's top-right corner instead of
@@ -423,24 +611,38 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
   Widget _wrapForFullscreen(Widget player) {
     final castController = widget.castController;
     final betterPlayer = _betterPlayerController;
-    if (castController == null || betterPlayer == null) return player;
+    // Cast is optional; the playlist controls are not tied to it, so the wrap
+    // still happens for a playlist with no cast controller in play.
+    if (betterPlayer == null) return player;
 
     final overlay = widget.castOverlayBuilder;
+    if (castController == null && overlay == null && !_playlistControlsPossible) {
+      return player;
+    }
 
     return Stack(
       children: [
         player,
         // Positioned.fill so the host's overlay gets the player's box rather
         // than the screen's — the two differ once the video is letterboxed.
-        if (overlay != null)
-          Positioned.fill(child: Builder(builder: overlay)),
+        if (overlay != null) Positioned.fill(child: Builder(builder: overlay)),
+        Positioned.fill(
+          child: _PlaylistNavOverlay(
+            player: betterPlayer,
+            controller: widget.controller,
+            panelOpen: _panelOpen,
+            onClosePanel: _closePanel,
+          ),
+        ),
         Positioned(
           top: 0,
           right: 0,
-          child: _CastControlBarButton(
+          child: _TopBarControls(
             player: betterPlayer,
+            controller: widget.controller,
             castController: castController,
-            onPressed: widget.onCastPressed,
+            onCastPressed: widget.onCastPressed,
+            onPlaylistPressed: _openPanel,
           ),
         ),
       ],
@@ -485,22 +687,31 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
 /// fullscreen. Listening to the player directly means both copies stay correct
 /// — and it stops the whole player subtree rebuilding every time the controls
 /// happen to fade.
-class _CastControlBarButton extends StatefulWidget {
-  const _CastControlBarButton({
+class _TopBarControls extends StatefulWidget {
+  const _TopBarControls({
     required this.player,
+    required this.controller,
     required this.castController,
-    required this.onPressed,
+    required this.onCastPressed,
+    required this.onPlaylistPressed,
   });
 
   final BetterPlayerController player;
-  final FastPixCastController castController;
-  final VoidCallback? onPressed;
+  final FastPixPlayerController controller;
+
+  /// Null when the host wired no cast support: the row then carries only the
+  /// queue button.
+  final FastPixCastController? castController;
+  final VoidCallback? onCastPressed;
+
+  /// Opens the playlist queue.
+  final VoidCallback onPlaylistPressed;
 
   @override
-  State<_CastControlBarButton> createState() => _CastControlBarButtonState();
+  State<_TopBarControls> createState() => _TopBarControlsState();
 }
 
-class _CastControlBarButtonState extends State<_CastControlBarButton> {
+class _TopBarControlsState extends State<_TopBarControls> {
   /// Whether the player's controls are on screen.
   ///
   /// Starts true because the player shows its controls on initialize unless
@@ -514,7 +725,7 @@ class _CastControlBarButtonState extends State<_CastControlBarButton> {
   }
 
   @override
-  void didUpdateWidget(_CastControlBarButton oldWidget) {
+  void didUpdateWidget(_TopBarControls oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (identical(oldWidget.player, widget.player)) return;
     oldWidget.player.removeEventsListener(_onPlayerEvent);
@@ -542,13 +753,28 @@ class _CastControlBarButtonState extends State<_CastControlBarButton> {
     setState(() => _controlsVisible = visible);
   }
 
+  /// Whether the host allows the queue button at all.
+  /// Whether the cast glyph shows before a receiver is found. Defaults to
+  /// true so the feature is discoverable, matching the configuration default.
+  bool get _castVisibleWithoutDevices =>
+      widget.controller.configuration?.controlsConfiguration
+          .showCastWhenNoDevices ??
+      true;
+
+  bool get _panelAllowed =>
+      widget.controller.configuration?.controlsConfiguration
+          .showPlaylistPanel ??
+      true;
+
   @override
   Widget build(BuildContext context) {
-    final controls = widget.player.betterPlayerConfiguration.controlsConfiguration;
+    final controls =
+        widget.player.betterPlayerConfiguration.controlsConfiguration;
     final controlsEnabled = widget.player.controlsEnabled;
-    // With controls turned off there is nothing to fade with, so the button is
-    // simply always there — otherwise it could never be reached.
+    // With controls turned off there is nothing to fade with, so the buttons
+    // are simply always there — otherwise they could never be reached.
     final visible = !controlsEnabled || _controlsVisible;
+    final castController = widget.castController;
 
     return SizedBox(
       height: controls.controlBarHeight,
@@ -563,15 +789,42 @@ class _CastControlBarButtonState extends State<_CastControlBarButton> {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              FastPixCastButton(
-                controller: widget.castController,
-                onPressed: widget.onPressed,
-              ),
+              // Leftmost of the row, so the cast glyph stays where viewers
+              // have always found it.
+              if (_panelAllowed) _buildPlaylistButton(controls),
+              if (castController != null)
+                FastPixCastButton(
+                  controller: castController,
+                  onPressed: widget.onCastPressed,
+                  showWhenNoDevices: _castVisibleWithoutDevices,
+                ),
               if (controlsEnabled) _buildTopBarReservation(controls),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  /// The queue button, drawn only once there is a playlist worth opening.
+  ///
+  /// Its own [StreamBuilder] rather than a rebuild of the whole row: the
+  /// playlist changes far less often than the controls fade, and the cast glyph
+  /// has no interest in either.
+  Widget _buildPlaylistButton(BetterPlayerControlsConfiguration controls) {
+    return StreamBuilder<FastPixPlaylistState>(
+      stream: widget.controller.playlistStateStream,
+      initialData: widget.controller.playlistState,
+      builder: (context, snapshot) {
+        final state = snapshot.data ?? widget.controller.playlistState;
+        if (state.count < 2) return const SizedBox.shrink();
+        return _PlaylistNavButton(
+          icon: Icons.playlist_play_rounded,
+          color: controls.iconsColor,
+          semanticLabel: 'Playlist',
+          onPressed: widget.onPlaylistPressed,
+        );
+      },
     );
   }
 
@@ -594,6 +847,210 @@ class _CastControlBarButtonState extends State<_CastControlBarButton> {
         final hasPip = snapshot.data ?? false;
         return SizedBox(width: hasPip ? buttonWidth * 2 : buttonWidth);
       },
+    );
+  }
+}
+
+
+/// Playlist previous/next, drawn over the player at the edges of its middle
+/// row.
+///
+/// This is an overlay rather than an addition to better_player's control skin
+/// because that skin is the engine's, not ours — the same reason
+/// [_CastControlBarButton] is an overlay. It follows the same rules: it fades
+/// with the controls, listening to the player directly so a fade does not
+/// rebuild the player subtree, and it lets taps through once they are gone so
+/// the edges of the video stay a place you can tap to bring them back.
+///
+/// The buttons sit at the far left and right edges, outboard of the ±10s skip
+/// pair better_player centres in the outer thirds of its middle row, so the two
+/// never collide whether or not `enableSkips` is on.
+class _PlaylistNavOverlay extends StatefulWidget {
+  const _PlaylistNavOverlay({
+    required this.player,
+    required this.controller,
+    required this.panelOpen,
+    required this.onClosePanel,
+  });
+
+  final BetterPlayerController player;
+  final FastPixPlayerController controller;
+
+  /// Whether the queue is open. Owned by the player state, because the button
+  /// that opens it lives in the top bar.
+  final bool panelOpen;
+  final VoidCallback onClosePanel;
+
+  @override
+  State<_PlaylistNavOverlay> createState() => _PlaylistNavOverlayState();
+}
+
+class _PlaylistNavOverlayState extends State<_PlaylistNavOverlay> {
+  /// Whether the player's controls are on screen. Starts true for the same
+  /// reason [_CastControlBarButtonState] does: the player shows them on
+  /// initialize unless they are disabled entirely.
+  bool _controlsVisible = true;
+
+  /// Where the playlist is. Seeded synchronously so the buttons are correct on
+  /// the first frame rather than after the first navigation.
+  late FastPixPlaylistState _playlist = widget.controller.playlistState;
+
+  StreamSubscription<FastPixPlaylistState>? _playlistSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.player.addEventsListener(_onPlayerEvent);
+    _subscribeToPlaylist();
+  }
+
+  @override
+  void didUpdateWidget(_PlaylistNavOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.player, widget.player)) {
+      oldWidget.player.removeEventsListener(_onPlayerEvent);
+      widget.player.addEventsListener(_onPlayerEvent);
+    }
+    if (!identical(oldWidget.controller, widget.controller)) {
+      _playlistSubscription?.cancel();
+      _playlist = widget.controller.playlistState;
+      _subscribeToPlaylist();
+    }
+  }
+
+  @override
+  void dispose() {
+    _playlistSubscription?.cancel();
+    widget.player.removeEventsListener(_onPlayerEvent);
+    super.dispose();
+  }
+
+  void _subscribeToPlaylist() {
+    _playlistSubscription =
+        widget.controller.playlistStateStream.listen((state) {
+      if (!mounted) return;
+      setState(() => _playlist = state);
+    });
+  }
+
+  /// Mirror the controls' own show/hide, as the cast button does.
+  void _onPlayerEvent(BetterPlayerEvent event) {
+    final bool? visible = switch (event.betterPlayerEventType) {
+      BetterPlayerEventType.controlsVisible => true,
+      BetterPlayerEventType.controlsHiddenStart => false,
+      _ => null,
+    };
+    if (visible == null || visible == _controlsVisible || !mounted) return;
+    setState(() => _controlsVisible = visible);
+  }
+
+  FastPixPlayerControlsConfiguration? get _config =>
+      widget.controller.configuration?.controlsConfiguration;
+
+  @override
+  Widget build(BuildContext context) {
+    final config = _config;
+    final arrows = config?.showPlaylistControls ?? true;
+    final panel = config?.showPlaylistPanel ?? true;
+    // One item is not a playlist to navigate, so nothing is drawn rather than
+    // buttons sitting there permanently disabled.
+    if (_playlist.count < 2 || !(arrows || panel)) {
+      return const SizedBox.shrink();
+    }
+
+    final controls =
+        widget.player.betterPlayerConfiguration.controlsConfiguration;
+    final controlsEnabled = widget.player.controlsEnabled;
+    // With controls turned off there is nothing to fade with, so the buttons
+    // are simply always there — otherwise they could never be reached.
+    final visible = !controlsEnabled || _controlsVisible;
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        IgnorePointer(
+          ignoring: !visible,
+          child: AnimatedOpacity(
+            opacity: visible ? 1.0 : 0.0,
+            duration: controls.controlsHideTime,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (arrows)
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      _PlaylistNavButton(
+                        icon: Icons.skip_previous_rounded,
+                        color: controls.iconsColor,
+                        semanticLabel: 'Previous video',
+                        // From the state, not the controller: the state is what
+                        // this overlay rebuilds on, so the two can never
+                        // disagree mid-frame.
+                        onPressed:
+                            _playlist.canGoPrevious ? _goPrevious : null,
+                      ),
+                      _PlaylistNavButton(
+                        icon: Icons.skip_next_rounded,
+                        color: controls.iconsColor,
+                        semanticLabel: 'Next video',
+                        onPressed: _playlist.canGoNext ? _goNext : null,
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
+        // Outside the fade: an open queue stays put while the controls behind
+        // it time out, which is what every player's queue does.
+        if (widget.panelOpen && panel)
+          FastPixPlaylistPanel(
+            controller: widget.controller,
+            onDismiss: widget.onClosePanel,
+          ),
+      ],
+    );
+  }
+
+
+  // Fire-and-forget: navigation reports failure by returning false and by the
+  // playlist state that follows, both of which this overlay already reflects.
+  void _goPrevious() => unawaited(widget.controller.previous());
+
+  void _goNext() => unawaited(widget.controller.next());
+}
+
+/// One playlist navigation glyph.
+///
+/// A null [onPressed] is the end of the playlist: the glyph dims and stops
+/// taking taps rather than disappearing, so the row does not reflow when the
+/// viewer reaches either end.
+class _PlaylistNavButton extends StatelessWidget {
+  const _PlaylistNavButton({
+    required this.icon,
+    required this.color,
+    required this.semanticLabel,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String semanticLabel;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onPressed != null;
+    return Opacity(
+      opacity: enabled ? 1.0 : 0.3,
+      child: IconButton(
+        onPressed: onPressed,
+        icon: Icon(icon, color: color, size: 32),
+        tooltip: semanticLabel,
+        padding: const EdgeInsets.all(12),
+        constraints: const BoxConstraints(),
+      ),
     );
   }
 }

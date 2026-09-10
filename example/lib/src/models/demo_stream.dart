@@ -20,6 +20,13 @@ class DemoStream {
   /// like a deleted asset, so it stays configurable per stream.
   final String? streamHost;
 
+  /// Host serving the DRM licence, or null for the package default.
+  ///
+  /// Separate from [streamHost] because they are different origins, but they
+  /// belong to the same environment: a staging manifest paired with a
+  /// production licence server fails at the handshake, not at the manifest.
+  final String? drmHost;
+
   /// Playback token, for private or DRM streams.
   final String? token;
 
@@ -45,6 +52,7 @@ class DemoStream {
     required this.title,
     this.description,
     this.streamHost,
+    this.drmHost,
     this.token,
     this.drmToken,
     this.drmEnabled = false,
@@ -63,15 +71,24 @@ class DemoStream {
     return parts.join(' · ');
   }
 
+  /// A blank host or token is the same as none at all: the package defaults
+  /// must stay in place rather than being overridden with an empty string.
+  static String? _orNull(String? value) =>
+      (value?.isEmpty ?? true) ? null : value;
+
   FastPixPlayerDataSource toDataSource() {
+    final drmConfiguration = !drmEnabled || (drmToken?.isEmpty ?? true)
+        ? null
+        : FastPixPlayerDrmConfiguration(
+            drmToken: drmToken!,
+            customDomain: _orNull(drmHost),
+          );
+
     return FastPixPlayerDataSource.hls(
       playbackId: playbackId,
-      customDomain: streamHost?.isEmpty ?? true ? null : streamHost,
-      token: token?.isEmpty ?? true ? null : token,
-      drmConfiguration:
-          !drmEnabled || (drmToken?.isEmpty ?? true)
-              ? null
-              : FastPixPlayerDrmConfiguration(drmToken: drmToken!),
+      customDomain: _orNull(streamHost),
+      token: _orNull(token),
+      drmConfiguration: drmConfiguration,
       streamType: isLive ? StreamType.live : StreamType.onDemand,
       title: title,
       description: description,
@@ -93,6 +110,7 @@ class DemoStream {
     'title': title,
     'description': description,
     'streamHost': streamHost,
+    'drmHost': drmHost,
     'token': token,
     'drmToken': drmToken,
     'drmEnabled': drmEnabled,
@@ -124,6 +142,7 @@ class DemoStream {
       title: title,
       description: json['description'] as String?,
       streamHost: json['streamHost'] as String?,
+      drmHost: json['drmHost'] as String?,
       token: json['token'] as String?,
       drmToken: json['drmToken'] as String?,
       drmEnabled: json['drmEnabled'] == true,
@@ -148,6 +167,7 @@ class DemoStream {
     String? title,
     String? description,
     String? streamHost,
+    String? drmHost,
     String? token,
     String? drmToken,
     bool? drmEnabled,
@@ -160,6 +180,7 @@ class DemoStream {
       title: title ?? this.title,
       description: description ?? this.description,
       streamHost: streamHost ?? this.streamHost,
+      drmHost: drmHost ?? this.drmHost,
       token: token ?? this.token,
       drmToken: drmToken ?? this.drmToken,
       drmEnabled: drmEnabled ?? this.drmEnabled,

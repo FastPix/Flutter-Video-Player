@@ -26,20 +26,60 @@ class _FakeCastController extends FastPixCastController {
 }
 
 Future<void> _pump(WidgetTester tester, _FakeCastController cast,
-    {VoidCallback? onPressed}) {
+    {VoidCallback? onPressed, bool showWhenNoDevices = true}) {
   return tester.pumpWidget(
     MaterialApp(
       home: Scaffold(
-        body: FastPixCastButton(controller: cast, onPressed: onPressed),
+        body: FastPixCastButton(
+          controller: cast,
+          onPressed: onPressed,
+          showWhenNoDevices: showWhenNoDevices,
+        ),
       ),
     ),
   );
 }
 
+/// The colour the glyph is drawn in, to tell the dimmed idle state from the
+/// live one without depending on an exact opacity.
+Color _glyphColour(WidgetTester tester, IconData icon) =>
+    tester.widget<Icon>(find.byIcon(icon)).color!;
+
 void main() {
-  group('shows the cast glyph only when it leads somewhere', () {
-    testWidgets('nothing is drawn before a receiver is found', (tester) async {
+  group('the glyph advertises the feature before a receiver exists', () {
+    testWidgets('it is drawn, dimmed, while nothing has been found',
+        (tester) async {
+      // A viewer who has never cast has to learn the player can. YouTube and
+      // every other large player keep the glyph present for exactly this
+      // reason; dimming says "idle", not "broken".
       await _pump(tester, _FakeCastController(FastPixCastState.noDevices));
+
+      expect(find.byIcon(Icons.cast), findsOneWidget);
+      expect(_glyphColour(tester, Icons.cast).a, lessThan(1.0));
+    });
+
+    testWidgets('a receiver appearing brings it to full strength',
+        (tester) async {
+      final cast = _FakeCastController(FastPixCastState.noDevices);
+      await _pump(tester, cast);
+      final idle = _glyphColour(tester, Icons.cast).a;
+
+      cast.emit(FastPixCastState.devicesFound);
+      await tester.pump();
+
+      expect(_glyphColour(tester, Icons.cast).a, greaterThan(idle));
+      expect(_glyphColour(tester, Icons.cast).a, 1.0);
+    });
+
+    testWidgets('showWhenNoDevices: false restores the checklist behaviour',
+        (tester) async {
+      // The Google Cast Design Checklist wants nothing until a receiver
+      // exists. Hosts certifying against it opt back in here.
+      await _pump(
+        tester,
+        _FakeCastController(FastPixCastState.noDevices),
+        showWhenNoDevices: false,
+      );
 
       expect(find.byIcon(Icons.cast), findsNothing);
       expect(find.byIcon(Icons.cast_connected), findsNothing);
@@ -48,6 +88,8 @@ void main() {
     testWidgets('an unavailable subsystem draws nothing either', (
       tester,
     ) async {
+      // Nothing to advertise where casting can never work: no Play Services,
+      // a failed Cast context, or a denied local-network permission on iOS.
       await _pump(tester, _FakeCastController(FastPixCastState.unavailable));
 
       expect(find.byIcon(Icons.cast), findsNothing);

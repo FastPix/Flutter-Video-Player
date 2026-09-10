@@ -17,6 +17,7 @@ import 'models/fastpix_cast_text_track.dart';
 import 'models/fastpix_player_data_source.dart';
 import 'models/fastpix_player_drm_configuration.dart';
 import 'models/fastpix_player_event.dart';
+import 'utils/fastpix_drm_log.dart';
 
 /// Drives Chromecast playback for a FastPix stream.
 ///
@@ -1380,6 +1381,13 @@ class FastPixCastController {
     // `loadRequest.media.customData.licenseUrl`. The shape is a contract with
     // that page — changing one without the other silently disables DRM, since
     // a receiver that finds no license URL just plays nothing.
+    FastPixDrmLog.armed(
+      playbackId: dataSource.playbackId,
+      reason: FastPixDrmLog.reasonCast,
+      host: Uri.tryParse(widevine.resolvedBaseUrl)?.host ?? '',
+      detail: 'receiver acquires it, not this device',
+    );
+
     return <String, dynamic>{
       'licenseUrl': widevine.licenseUrl(dataSource.playbackId),
       'protectionSystem': FastPixDrmType.widevine.value,

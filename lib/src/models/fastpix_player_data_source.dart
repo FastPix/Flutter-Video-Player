@@ -141,6 +141,19 @@ class FastPixPlayerDataSource {
   /// Whether to loop the video
   final bool loop;
 
+  /// Stretches of this video a viewer may want to jump over — an intro, a
+  /// recap, a song, the credits.
+  ///
+  /// Optional; a source declaring none behaves exactly as it did before. The
+  /// player holds them as pending configuration until this media's duration is
+  /// known, validates them once against it, and then reports when playback
+  /// enters and leaves each one. See [FastPixPlayerController.skipCurrentSegment].
+  ///
+  /// Deliberately separate from
+  /// [FastPixPlayerControlsConfiguration.enableSkips], which means the engine's
+  /// own ±10 second buttons.
+  final List<FastPixSkipSegment>? skipSegments;
+
   /// Start time for the video
   final Duration? startAt;
 
@@ -184,6 +197,7 @@ class FastPixPlayerDataSource {
     this.subtitles,
     this.showSubtitles = false,
     this.loop = false,
+    this.skipSegments,
     this.startAt,
     this.endAt,
   });
@@ -412,6 +426,7 @@ class FastPixPlayerDataSource {
     List<FastPixPlayerSubtitle>? subtitles,
     bool? showSubtitles,
     bool? loop,
+    List<FastPixSkipSegment>? skipSegments,
     Duration? startAt,
     Duration? endAt,
     String? token,
@@ -438,6 +453,7 @@ class FastPixPlayerDataSource {
       subtitles: subtitles ?? this.subtitles,
       showSubtitles: showSubtitles ?? this.showSubtitles,
       loop: loop ?? this.loop,
+      skipSegments: skipSegments ?? this.skipSegments,
       startAt: startAt ?? this.startAt,
       endAt: endAt ?? this.endAt,
       token: token ?? this.token,
@@ -450,6 +466,160 @@ class FastPixPlayerDataSource {
       customData: customData ?? this.customData,
       videoData: videoData ?? this.videoData,
     );
+  }
+
+  /// Build a source from one playlist JSON entry.
+  ///
+  /// The contract is deliberately forgiving in one direction and strict in the
+  /// other: `playbackId` is required and must be a non-empty string, every
+  /// other field is optional, and **unknown keys are ignored** — so a producer
+  /// can add fields without breaking integrations already in the field.
+  ///
+  /// Anything unreadable throws [FastPixPlaylistException] naming the problem
+  /// and, for a playlist, the offending position. A playlist is adopted whole
+  /// or not at all, so a bad entry is reported rather than skipped: a silently
+  /// shortened playlist is far harder to diagnose than a rejected one.
+  ///
+  /// ```json
+  /// {
+  ///   "playbackId": "abc123",
+  ///   "title": "Episode 1",
+  ///   "token": "…",
+  ///   "drmToken": "…",
+  ///   "customDomain": "stream.example.com",
+  ///   "thumbnailUrl": "https://…/thumb.jpg",
+  ///   "duration": 1425.5,
+  ///   "streamType": "onDemand",
+  ///   "skipSegments": [{"start": 0, "end": 30, "type": "intro"}]
+  /// }
+  /// ```
+  ///
+  /// Times — `duration`, and each segment's `start` and `end` — are seconds.
+  factory FastPixPlayerDataSource.fromJson(
+    Map<String, dynamic> json, {
+
+    /// Position in the playlist, quoted in any failure so the caller can find
+    /// the entry that is wrong.
+    int? itemIndex,
+  }) {
+    final playbackId = json['playbackId'];
+    if (playbackId is! String || playbackId.isEmpty) {
+      _rejectEntry(
+        FastPixPlaylistErrorCode.missingPlaybackId,
+        'Every playlist entry needs a non-empty "playbackId".',
+        itemIndex,
+      );
+    }
+
+    final drmToken = _readString(json, 'drmToken', itemIndex);
+    final title = _readString(json, 'title', itemIndex);
+    final streamType = _readStreamType(json, itemIndex);
+
+    return FastPixPlayerDataSource.hls(
+      playbackId: playbackId,
+      token: _readString(json, 'token', itemIndex),
+      customDomain: _readString(json, 'customDomain', itemIndex),
+      title: title,
+      description: _readString(json, 'description', itemIndex),
+      thumbnailUrl: _readString(json, 'thumbnailUrl', itemIndex),
+      duration: _readSeconds(json, 'duration', itemIndex),
+      streamType: streamType,
+      drmConfiguration: drmToken == null
+          ? null
+          : FastPixPlayerDrmConfiguration(drmToken: drmToken),
+      skipSegments: _readSkipSegments(json, itemIndex),
+      videoData: VideoDetailsData(
+        videoId: playbackId,
+        title: title ?? playbackId,
+      ),
+    );
+  }
+
+  /// Reject a playlist entry, naming its position when one was supplied.
+  ///
+  /// The readers below are static rather than closures inside
+  /// [FastPixPlayerDataSource.fromJson] so that each validation rule can be
+  /// read on its own, without the factory carrying all of them at once.
+  static Never _rejectEntry(
+    FastPixPlaylistErrorCode code,
+    String message,
+    int? itemIndex,
+  ) =>
+      throw FastPixPlaylistException(code, message, itemIndex: itemIndex);
+
+  static String? _readString(
+    Map<String, dynamic> json,
+    String key,
+    int? itemIndex,
+  ) {
+    final value = json[key];
+    if (value == null) return null;
+    if (value is! String) {
+      _rejectEntry(
+        FastPixPlaylistErrorCode.malformedEntry,
+        'Playlist entry "$key" must be a string.',
+        itemIndex,
+      );
+    }
+    return value.isEmpty ? null : value;
+  }
+
+  static Duration? _readSeconds(
+    Map<String, dynamic> json,
+    String key,
+    int? itemIndex,
+  ) {
+    final value = json[key];
+    if (value == null) return null;
+    if (value is! num) {
+      _rejectEntry(
+        FastPixPlaylistErrorCode.malformedEntry,
+        'Playlist entry "$key" must be a number of seconds.',
+        itemIndex,
+      );
+    }
+    return Duration(milliseconds: (value * 1000).round());
+  }
+
+  static StreamType _readStreamType(Map<String, dynamic> json, int? itemIndex) {
+    final streamType = _readString(json, 'streamType', itemIndex);
+    if (streamType == null) return StreamType.onDemand;
+    if (streamType == 'live') return StreamType.live;
+    if (streamType == 'onDemand') return StreamType.onDemand;
+    _rejectEntry(
+      FastPixPlaylistErrorCode.malformedEntry,
+      'Playlist entry "streamType" must be "live" or "onDemand".',
+      itemIndex,
+    );
+  }
+
+  static List<FastPixSkipSegment>? _readSkipSegments(
+    Map<String, dynamic> json,
+    int? itemIndex,
+  ) {
+    final value = json['skipSegments'];
+    if (value == null) return null;
+    if (value is! List) {
+      _rejectEntry(
+        FastPixPlaylistErrorCode.malformedEntry,
+        'Playlist entry "skipSegments" must be an array.',
+        itemIndex,
+      );
+    }
+    return <FastPixSkipSegment>[
+      for (final entry in value)
+        if (entry is Map)
+          FastPixSkipSegment.fromJson(
+            Map<String, dynamic>.from(entry),
+            itemIndex: itemIndex,
+          )
+        else
+          _rejectEntry(
+            FastPixPlaylistErrorCode.malformedEntry,
+            'Every "skipSegments" entry must be an object.',
+            itemIndex,
+          ),
+    ];
   }
 
   /// Create HLS data source
@@ -474,6 +644,7 @@ class FastPixPlayerDataSource {
     List<FastPixPlayerSubtitle>? subtitles,
     bool showSubtitles = false,
     bool loop = false,
+    List<FastPixSkipSegment>? skipSegments,
     Duration? startAt,
     Duration? endAt,
     String? token,
@@ -503,6 +674,7 @@ class FastPixPlayerDataSource {
       subtitles: subtitles,
       showSubtitles: showSubtitles,
       loop: loop,
+      skipSegments: skipSegments,
       startAt: startAt,
       endAt: endAt,
       token: token,

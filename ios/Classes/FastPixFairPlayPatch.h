@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 
+@class AVURLAsset;
+
 NS_ASSUME_NONNULL_BEGIN
 
 /// Makes FairPlay work against licence servers that are not EZDRM.
@@ -34,6 +36,30 @@ NS_ASSUME_NONNULL_BEGIN
 /// this patch were absent.
 + (void)setCertificateUrl:(nullable NSString *)certificateUrl
                licenseUrl:(nullable NSString *)licenseUrl;
+
+/// Supply the FairPlay URLs for one specific video.
+///
+/// Preferred over [setCertificateUrl:licenseUrl:], which holds a single pair
+/// for the whole process. A warm player is built in the background while
+/// another video plays, so at the moment its resource loader is installed the
+/// single pair belongs to whichever video was configured last — and the warm
+/// player then acquires a licence that cannot decrypt the video it was warmed
+/// for. Registering per playback id removes that shared slot.
+///
+/// The registry is capped; the oldest entry is dropped once it is full, which
+/// falls back to the single-pair behaviour rather than failing.
++ (void)registerCertificateUrl:(NSString *)certificateUrl
+                    licenseUrl:(nullable NSString *)licenseUrl
+                 forPlaybackId:(NSString *)playbackId;
+
+/// Record the URL an asset was built from, so the delegate installed on its
+/// resource loader can be matched to that video's registered configuration.
+///
+/// Called from `FastPixCachingAssetHook`, which already intercepts
+/// `-[AVURLAsset initWithURL:options:]` — the one moment where an asset and
+/// its URL are both in hand. `AVAssetResourceLoader` has no back-pointer to
+/// its asset, so without this there is nothing to match on.
++ (void)noteAsset:(AVURLAsset *)asset url:(NSURL *)url;
 
 /// Whether [install] succeeded. Exposed so a failure is assertable from Dart
 /// rather than only visible in a device log.

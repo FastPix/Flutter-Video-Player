@@ -5,6 +5,10 @@ streaming app rather than a single playback form. It browses a catalog of
 streams, plays public, private and DRM protected media, casts to Chromecast, and
 puts the preloading and precaching machinery on screen so you can watch it work.
 
+It uses none of the bundled player skin. Video is drawn by the headless
+`FastPixVideoSurface`, and every control over it belongs to the app, built on
+the SDK's public API alone. See [Custom UI](#custom-ui).
+
 ## Running
 
 The example depends on the package from the parent directory (`path: ../`), so
@@ -20,12 +24,24 @@ It starts with a seeded catalog of public FastPix playback IDs, so there is
 something to play immediately. To use your own instead:
 
 ```bash
-flutter run --dart-define=FASTPIX_PLAYBACK_IDS=id-one,id-two,id-three
+flutter run --dart-define=FASTPIX_PLAYBACK_IDS='id-one;id-two;id-three'
 ```
 
-Command line IDs take precedence over the stored catalog and replace it. The
-catalog otherwise persists to `demo_catalog.json` in the application support
-directory, so streams you add survive a restart.
+Streams are separated by semicolons, because a comma already separates the
+fields within one stream. The full field order is `playbackId, title, token,
+drmToken, host, drmHost`, and everything after the playback ID is optional, so a
+single tokened stream can be given the same way:
+
+```bash
+flutter run --dart-define=FASTPIX_PLAYBACK_IDS='12f8d4d9-…, DRM prod, <token>, <drmToken>'
+```
+
+Command line IDs take precedence over the stored catalog and replace it. To add
+to the shipped catalog rather than replace it, use `FASTPIX_EXTRA_PLAYBACK_IDS`
+in the same format, or a gitignored `.env` file with
+`--dart-define-from-file=.env`, which is the seat for DRM tokens. The catalog
+otherwise persists to `demo_catalog.json` in the application support directory,
+so streams you add survive a restart.
 
 ## Using the demo
 
@@ -38,12 +54,16 @@ The `+` button adds one.
 **Watch** plays the stream and, below it, exposes the parts usually invisible:
 
 - *Up next*, with previous and next controls and an **Autoplay next** switch.
-  Advancing swaps the source in place rather than pushing a new screen.
+  The rail is an SDK playlist: the screen calls `setPlaylist` once and then
+  `jumpTo`, and the SDK swaps the source in place rather than the app pushing a
+  new screen. Autoplay is `controller.autoPlayNext`, not an app-side listener.
 - A precache panel with its status and the exact byte count written.
 - A warm start badge reading `WARM START · warmed in Nms` or `COLD START`, which
   is the single clearest signal that preloading is doing anything.
-- A preload event feed, and detail rows for playback ID, host, stream type, DRM
-  and subtitles, ending in the fully resolved stream URL.
+- A preload event feed, and detail rows for playback ID, host, stream type, DRM,
+  subtitles and skip segments, ending in the fully resolved stream URL. The
+  seeded streams declare no skip segments, so that row reads *None* until you
+  play a source that carries them.
 
 The seeded streams are public video on demand with no token and no DRM, so the
 *Live now* rail stays empty until you add a stream with the live switch on.
@@ -60,10 +80,45 @@ plays, so a leftover token cannot silently turn an ordinary playback ID into a
 DRM load. When your token was generated with the DRM License feature enabled,
 the same value works in both the token and DRM token fields.
 
+## Custom UI
+
+The player surface is `FastPixVideoSurface`, which draws video and nothing else.
+Everything over it lives in `lib/src/custom_ui/` and is built on the public API
+only — no widget there reaches past the SDK to the playback engine.
+
+| Widget | Public API it is built on |
+| --- | --- |
+| `FastPixSeekBar` | `playbackStateStream`, `beginScrub` / `updateScrub` / `endScrub` |
+| `FastPixPlayPauseButton` | `playbackStateStream`, `togglePlayPause` |
+| `FastPixQualityMenu` | `getQualityLevels`, `setQualityLevel`, `setQualityAuto` |
+| `FastPixAudioTrackMenu` | `getAudioTracks`, `setAudioTrack` |
+| `FastPixSubtitleMenu` | `getSubtitleTracks`, `setSubtitleTrack`, `disableSubtitles` |
+| `FastPixPlaybackRateMenu` | `supportedPlaybackRates`, `setPlaybackRate` |
+| `FastPixPlaylistNavButton` | `playlistStateStream`, `next`, `previous` |
+| `FastPixPlaylistTitle` | `playlistStateStream` |
+
+Each menu rebuilds when its tracks become available, driven by the readiness
+events `qualityLevelsReady`, `audioTracksReady` and `subtitleTracksReady`, and
+again when the active selection changes. The audio menu disables itself on a
+single-audio stream, which offers no choice. The queue
+panel is the SDK's own `FastPixPlaylistPanel`, so the demo does not rebuild a
+list the SDK already draws.
+
+Fullscreen is the app's own layout rather than an SDK route, and the same
+control widget is used inline and fullscreen.
+
+### Picture-in-Picture
+
+The PiP button calls `controller.pip.togglePip()`, and the watch screen sets
+`controller.pip.autoEnterOnBackground = true`, so leaving the app while playing
+opens a PiP window. Both platforms need the setup in
+[Platform setup](#platform-setup); the example already declares it.
+
 ## Chromecast
 
-The cast glyph appears in the player's own control bar once a receiver is found.
-Tapping it opens a device picker; choosing a device moves playback to the TV at
+The cast glyph sits in the app's own control bar. It is dimmed until a receiver
+is found, and hidden entirely where casting can never work, so a viewer who has
+never cast still learns the player can. Tapping it opens a device picker; choosing a device moves playback to the TV at
 the position it had reached locally.
 
 While casting, the video is replaced by a remote control surface with a
@@ -93,14 +148,15 @@ A diagnostics sheet opens from the tune icon on the home screen and the
 
 The demo runs both, with different settings in each place, which is the point:
 
-| | Where | Strategy | Window |
-| --- | --- | --- | --- |
-| Home | Whole catalog | `network` | 3 |
-| Watch | Neighbours in the queue | `player` | 4 |
+| | Where | Driven by | Strategy | Window |
+| --- | --- | --- | --- | --- |
+| Home | Whole catalog | The app | `network` | 3 |
+| Watch | Neighbours in the playlist | The SDK | `player` | `preloadRadius`, default 2 |
 
 The home screen warms the connection and manifest broadly, because it holds no
-decoders and costs little. The watch screen warms whole players for the
-immediate neighbours, so the next or previous item starts instantly. Home stops
+decoders and costs little. The watch screen calls no preload of its own: with a
+playlist set, the SDK warms whole players for the immediate neighbours after
+each load, so the next or previous item starts instantly. Home stops
 warming while the watch screen is on top, so it cannot evict the warms that are
 about to be used, and cast awareness is wired up so no local decoder is spent
 while playback is on a receiver.
@@ -114,10 +170,17 @@ can confirm bytes landed with `adb logcat | grep CacheWorker`.
 
 - Browsing and playing with `FastPixPlayerDataSource.hls(...)`, including
   `drmConfiguration` for protected media and external subtitle tracks.
+- Playlists through the SDK: `setPlaylist`, `jumpTo`, `autoPlayNext` and
+  `playlistStateStream`, with `loadPlaybackId` to reload in place.
+- A complete custom UI over `FastPixVideoSurface`, with the reference controls
+  in `lib/src/custom_ui/`.
+- Picture-in-Picture through `controller.pip`, including automatic entry when
+  the app goes to the background.
 - Sharing one `FastPixPlayerConfiguration` between preloading and playback,
   which is what makes a warmed player adoptable. A mismatch is refused.
-- `FastPixPreloadManager` under both strategies, with status per source and the
-  adoption result surfaced on screen.
+- `FastPixPreloadManager` under both strategies: called directly on the home
+  screen, and left to the SDK's playlist windowing on the watch screen, with
+  status per source and the adoption result surfaced on screen.
 - `FastPixPrecacheManager.precacheManifest` with byte accounting.
 - `FastPixCastController` end to end: discovery, session handover with
   `startCastingFrom` / `stopCastingTo`, remote transport, volume, subtitle
@@ -158,6 +221,17 @@ plus the Cast options provider and the media notification service inside
 rest are for Chromecast. The runtime nearby devices request is made by the SDK
 from `startDiscovery()`.
 
+Picture-in-Picture needs the activity to declare it, and to handle the
+configuration changes itself:
+
+```xml
+<activity
+    android:name=".MainActivity"
+    android:supportsPictureInPicture="true"
+    android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+    ... >
+```
+
 DRM playback on Android uses Widevine and is fully supported.
 
 ### iOS
@@ -176,6 +250,16 @@ Podfile:
 
 ```bash
 cd ios && pod install
+```
+
+Picture-in-Picture keeps playing while the app is in the background, which needs
+the audio background mode in `Info.plist`:
+
+```xml
+<key>UIBackgroundModes</key>
+<array>
+    <string>audio</string>
+</array>
 ```
 
 Chromecast discovery needs `NSLocalNetworkUsageDescription`,

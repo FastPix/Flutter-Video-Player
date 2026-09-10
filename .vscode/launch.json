@@ -1,0 +1,27 @@
+{
+  // Runs the demo with the local stream configuration applied, so the DRM
+  // entries in the catalog arrive with their tokens and nobody has to paste a
+  // flag or type a token into the app.
+  //
+  // `example/.env` is gitignored and absent on a fresh clone; the build fails
+  // on a missing define file rather than starting without it, so the second
+  // configuration is the one to pick when you have no local config.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "example (with .env)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "cwd": "example",
+      "toolArgs": ["--dart-define-from-file=.env"]
+    },
+    {
+      "name": "example (no local config)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "cwd": "example"
+    }
+  ]
+}

@@ -2,6 +2,7 @@ import 'package:fastpix_player_example/main.dart';
 import 'package:fastpix_player_example/src/catalog.dart';
 import 'package:fastpix_player_example/src/models/demo_stream.dart';
 import 'package:fastpix_player_example/src/widgets/stream_form_sheet.dart';
+import 'package:fastpix_video_player/fastpix_video_player.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -85,6 +86,40 @@ void main() {
       );
 
       expect(stream.toDataSource().customDomain, isNull);
+    });
+
+    // `toDataSource` is the only seam between the catalogue and the player:
+    // once a playlist is set, the up-next rail renders from the *sources* the
+    // player holds, so anything the rail shows has to survive this conversion.
+    // These two assertions moved here when `PlaybackQueue` was deleted — the
+    // playlist itself now lives in the SDK.
+    test('carries the fields the up-next rail renders', () {
+      const stream = DemoStream(
+        playbackId: 'abc',
+        title: 'Episode 1',
+        description: 'The first one',
+        isLive: true,
+      );
+
+      final source = stream.toDataSource();
+      expect(source.title, 'Episode 1');
+      expect(source.description, 'The first one');
+      expect(source.streamType, StreamType.live);
+    });
+
+    test('converts a catalogue list in order', () {
+      const catalogue = <DemoStream>[
+        DemoStream(playbackId: 'v0', title: 'v0'),
+        DemoStream(playbackId: 'v1', title: 'v1'),
+        DemoStream(playbackId: 'v2', title: 'v2'),
+      ];
+
+      expect(
+        <FastPixPlayerDataSource>[
+          for (final stream in catalogue) stream.toDataSource(),
+        ].map((source) => source.playbackId),
+        <String>['v0', 'v1', 'v2'],
+      );
     });
   });
 }

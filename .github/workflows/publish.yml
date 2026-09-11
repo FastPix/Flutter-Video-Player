@@ -12,10 +12,18 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-      - uses: dart-lang/setup-dart@v1   # sets up OIDC credentials
+
+      - uses: dart-lang/setup-dart@v1
+
       - run: flutter pub get
+
+      - name: Revert Flutter's analysis_options rewrite
+        run: git checkout -- analysis_options.yaml example/analysis_options.yaml
+
       - run: flutter pub publish --dry-run
+
       - run: flutter pub publish --force

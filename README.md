@@ -1,8 +1,52 @@
-# Introduction:
+# FastPix Flutter Video Player SDK - HLS streaming with DRM and Chromecast
 
-This SDK simplifies HLS video playback by offering a wide range of customization options for an enhanced viewing experience. It streamlines streaming setup by utilizing playback IDs that have reached the "ready" status to generate stream URLs. These playback IDs enable seamless integration and video playback within the FastPix-player, making the entire streaming process efficient and user-friendly.
+[![Pub Version](https://img.shields.io/pub/v/fastpix_video_player)](https://pub.dev/packages/fastpix_video_player)
+[![Pub Likes](https://img.shields.io/pub/likes/fastpix_video_player)](https://pub.dev/packages/fastpix_video_player)
+[![Platform](https://img.shields.io/badge/platform-Android%20%7C%20iOS-0CB16D)](https://pub.dev/packages/fastpix_video_player)
+[![License: MIT](https://img.shields.io/github/license/FastPix/Flutter-Video-Player)](./LICENSE)
 
-# Key Features:
+The **FastPix Flutter video player SDK** adds HLS (HTTP Live Streaming) video playback to Flutter apps on Android and iOS from a FastPix playback ID. It ships DRM (Widevine and FairPlay), Chromecast, picture-in-picture, playlists and preloading, with FastPix playback quality-of-experience (QoE) analytics wired in from the first frame.
+
+It is a hosted-streaming player for video delivered by FastPix, not a replacement for Flutter's low-level `video_player` plugin or a UI wrapper like Chewie. Reach for it when you stream HLS, need DRM or live, and want built-in quality-of-experience analytics without wiring a player, a control UI and a data SDK together yourself.
+
+**Works with:** Flutter (Android and iOS) · HLS (.m3u8) on-demand and live · FastPix playback IDs · Widevine / FairPlay DRM · Chromecast
+
+[Documentation](https://fastpix.com/docs/flutter-player/install-fastpix-flutter-player) · [Create a free account](https://dashboard.fastpix.com/signup?utm_source=github&utm_medium=referral&utm_campaign=github_signup)
+
+## Start here
+
+New to the SDK? Work through these in order:
+
+1. [Before you start](#before-you-start) - create a workspace and a playback ID
+2. [Install the SDK](#installation)
+3. [Play your first video](#basic-usage-example)
+4. [Play public media](#public-media)
+5. [Play private, token-protected media](#private-media)
+6. [Play DRM-protected media](#drm-protected-media)
+7. [Control quality and resolution](#quality-control)
+8. [Build a custom player UI](#building-a-custom-ui)
+9. [Cast to a TV with Chromecast](#chromecast)
+10. [Picture-in-Picture](#picture-in-picture)
+11. [Play a playlist](#playlists)
+12. [Preload for instant starts](#preloading-and-precaching)
+13. [FAQ](#faq)
+
+## Why FastPix
+
+- **Analytics built in.** Every player reports startup time, rebuffering, bitrate and playback errors to the FastPix dashboard, so you do not bolt on a separate data SDK.
+- **DRM without the plumbing.** Widevine on Android and FairPlay on iOS play through the FastPix license server; license and certificate URLs are derived from the playback ID, so you supply only a token.
+- **TV and system integration.** Chromecast, picture-in-picture and iOS lock-screen controls are part of the SDK, not add-ons you assemble.
+- **Instant starts.** Preloading, precaching and prerendering warm upcoming items so the next tap cuts straight to video instead of a spinner.
+
+## Who it's for
+
+- **OTT and streaming apps:** ship an HLS player with DRM, quality control and QoE analytics without assembling three libraries.
+- **Online learning and e-learning:** play course videos with resume, playlists, skip-intro segments and watch analytics.
+- **Live events and sports:** live HLS playback with Chromecast to the big screen.
+- **Short-form and social feeds:** preloading and prerendering for smooth vertical playback, plus picture-in-picture.
+- **Premium and enterprise content:** DRM-protected playback with on-device screen-capture protection on Android.
+
+## Key features
 
 - **Playback Control**
     - The `playbackId` allows for easy video playback by linking directly to the media file. Playback is available as soon as the media status is "ready."
@@ -17,7 +61,7 @@ This SDK simplifies HLS video playback by offering a wide range of customization
     - Protected media plays through the FastPix license server using `drmConfiguration`, with Widevine on Android and FairPlay on iOS.
     - License and certificate URLs are derived from the playback ID, so only the DRM token has to be supplied.
     - DRM failures are normalized into stable error codes with actionable messages, so callers can refresh a token, retry, or fall back without parsing platform error strings.
-    - Screenshots and screen recording are blocked during DRM playback on Android by default — see [Screen capture protection](#screen-capture-protection).
+    - Screenshots and screen recording are blocked during DRM playback on Android by default - see [Screen capture protection](#screen-capture-protection).
 
 - **Inbuilt error handling**
     - The player includes inbuilt error handling that displays appropriate error messages, helping developers quickly understand and address any issues that arise during playback.
@@ -32,47 +76,49 @@ This SDK simplifies HLS video playback by offering a wide range of customization
     - Cast failures are normalized into stable error codes the same way DRM failures are, including the Android 13+ nearby devices permission that otherwise makes discovery silently find nothing.
 
 - **Preloading and precaching**
-    - `FastPixPreloadManager` warms upcoming sources so the next tap skips the manifest fetch, the DRM license acquisition and decoder setup — either the network path alone, or a whole player that playback then adopts.
+    - `FastPixPreloadManager` warms upcoming sources so the next tap skips the manifest fetch, the DRM license acquisition and decoder setup - either the network path alone, or a whole player that playback then adopts.
     - `FastPixPrecacheManager` writes bytes to disk ahead of playback, so a later session starts a round trip closer to the first frame.
-    - Both are best effort and never a precondition: any failure falls through to ordinary playback, and neither reports on the playback error channel — see [Preloading and Precaching](#preloading-and-precaching).
+    - Both are best effort and never a precondition: any failure falls through to ordinary playback, and neither reports on the playback error channel - see [Preloading and Precaching](#preloading-and-precaching).
 
 - **Playlists and skip segments**
     - One controller plays an ordered list of sources: `setPlaylist` or `setPlaylistFromJson`, `next()` / `previous()` / `jumpTo(index)`, autoplay-next and repeat, with the queue drawn by `FastPixPlaylistPanel`.
     - The SDK warms the items either side of the active one automatically, so an advance starts from a warm player rather than a cold manifest fetch.
-    - An item can declare intro, recap, song and credits ranges, and the player offers a skip once playback is inside one — see [Playlists](#playlists).
+    - An item can declare intro, recap, song and credits ranges, and the player offers a skip once playback is inside one - see [Playlists](#playlists).
 
 - **Prerendering**
     - The next playlist item waits paused and muted on a hidden surface beneath the active video, with its first frame already drawn, so Next and autoplay-next cut straight to video instead of a black frame.
-    - On by default, with a switch for cellular; best effort, and it never surfaces as a playback error — see [Prerendering](#prerendering).
+    - On by default, with a switch for cellular; best effort, and it never surfaces as a playback error - see [Prerendering](#prerendering).
 
 - **Custom UI**
     - `FastPixVideoSurface` renders video and nothing else, so an app can stack its own transport over it and never use the bundled skin.
-    - The controller exposes the whole functionality API behind those controls: a playback state stream, scrubbing, playback rate, quality levels, audio tracks and subtitle tracks — see [Building a custom UI](#building-a-custom-ui).
+    - The controller exposes the whole functionality API behind those controls: a playback state stream, scrubbing, playback rate, quality levels, audio tracks and subtitle tracks - see [Building a custom UI](#building-a-custom-ui).
 
 - **Picture-in-Picture**
     - `controller.pip` enters, exits and toggles a PiP window on Android and iOS, and can open one automatically when the app goes to the background.
-    - The window's content is yours to build with `pipBuilder`, or left to the bundled layout — see [Picture-in-Picture](#picture-in-picture).
+    - The window's content is yours to build with `pipBuilder`, or left to the bundled layout - see [Picture-in-Picture](#picture-in-picture).
 
 - **Seek preview**
     - The player loads the active source's FastPix spritesheet in the background and hands a custom seek bar a thumbnail for any position, with `FastPixSeekPreview` or `controller.spritesheetTileAt(position)`.
-    - On by default for on-demand sources; opt into an advanced spritesheet for a thumbnail every 1 to 10 seconds — see [Seek preview](#seek-preview-spritesheets).
+    - On by default for on-demand sources; opt into an advanced spritesheet for a thumbnail every 1 to 10 seconds - see [Seek preview](#seek-preview-spritesheets).
 
 - **Advanced stream control**
     - The player supports `onDemand` and `live` stream capabilities by utilizing specified `streamType`, enabling a versatile playback experience based on content type.
     - Manage video quality with `minResolution`, `maxResolution`, `resolution` and `renditionOrder` options, allowing either automated or controlled playback quality adjustments.
 
-# Prerequisites:
+## Before you start
 
-## Getting started with FastPix Flutter Player:
-To get started with the FastPix Player SDK we need some prerequisites, follow these steps:
-1. **Log in to the FastPix Dashboard**: Navigate to the [FastPix-Dashboard](https://dashboard.fastpix.com) and log in with your credentials.
-2. **Create Media**: Start by creating a media using a pull or push method. You can also use our APIs instead for [Push media](https://fastpix.com/docs/upload-videos/upload-videos-from-device) or [Pull media](https://fastpix.com/docs/upload-videos/upload-videos-from-a-url).
-3. **Retrieve Media Details**: After creation, access the media details by navigating to the "View Media" page.
-4. **Get Playback ID**: From the media details, obtain the playback ID.
-5. **Play Video**: Use the playback ID in the FastPix-player to play the video seamlessly.
+You need a FastPix account and a playback ID before the player has anything to play. A playback ID is the identifier FastPix gives a piece of media once it has finished processing and reached the "ready" status.
+
+1. **Create a free account** and sign in to the [FastPix Dashboard](https://dashboard.fastpix.com/signup?utm_source=github&utm_medium=referral&utm_campaign=github_signup).
+2. **Set up a workspace** and generate your API credentials - see [set up a workspace](https://fastpix.com/docs/getting-started/set-up-a-workspace) and [generate API credentials](https://fastpix.com/docs/getting-started/activate-your-account#generate-api-credentials).
+3. **Create media** with a pull or push upload, in the dashboard or the API - see [upload from a device](https://fastpix.com/docs/upload-videos/upload-videos-from-device) or [upload from a URL](https://fastpix.com/docs/upload-videos/upload-videos-from-a-url).
+4. **Get the playback ID** from the media's details once its status is "ready".
+5. **Play the video** by passing that playback ID to the player, as shown below.
+
+For private or DRM-protected media you also generate a token - see [Private Media](#private-media) and [DRM Protected Media](#drm-protected-media).
 
 
-# Installation:
+## Installation
 To get started with the SDK, first install the FastPix Player SDK. Run `flutter pub add fastpix_video_player`, or add the dependency to your `pubspec.yaml`:
 ```yaml
 dependencies:
@@ -166,7 +212,7 @@ class _FastPixPlayerDemoState extends State<FastPixPlayerDemo> {
 FastPix Player provides advanced quality control options:
 
 The quality parameters live on the data source itself and travel to FastPix as
-URL parameters. A dimension left unset — or set to `auto` — is not sent at all,
+URL parameters. A dimension left unset - or set to `auto` - is not sent at all,
 leaving the choice to the player.
 
 ```dart
@@ -222,7 +268,7 @@ To control how a video fits a player of a different shape, set
 
 Pass a `FastPixCastController` to put the cast glyph in the player's own control
 bar. `onCastPressed` is left to the app so the device picker matches the rest of
-it — without it the button is inert.
+it - without it the button is inert.
 
 ```dart
 FastPixPlayer(
@@ -315,7 +361,7 @@ FastPix serves DRM protected media as HLS with CBCS encryption. Playback require
 
 License and certificate URLs are derived from the playback ID, so only the DRM token has to be supplied.
 
-Generate both JWTs with the FastPix JWT generator — see [Set up DRM encryption](https://fastpix.com/docs/video-security/set-up-drm-encryption) for enabling DRM on a media, and [How to generate DRM tokens](https://fastpix.com/docs/web-player/play-drm-protected-content#how-to-generate-drm-tokens) for issuing the `token` and `drmToken` (enable the **DRM License** feature to reuse a single token for both).
+Generate both JWTs with the FastPix JWT generator - see [Set up DRM encryption](https://fastpix.com/docs/video-security/set-up-drm-encryption) for enabling DRM on a media, and [How to generate DRM tokens](https://fastpix.com/docs/web-player/play-drm-protected-content#how-to-generate-drm-tokens) for issuing the `token` and `drmToken` (enable the **DRM License** feature to reuse a single token for both).
 
 ```dart
 final drmDataSource = FastPixPlayerDataSource.hls(
@@ -337,7 +383,7 @@ FastPixPlayerDrmConfiguration(
 );
 ```
 
-Caching is unaffected by DRM on Android. media3 keeps `DrmSessionManager` and `CacheDataSource` orthogonal, so cached segments stay encrypted on disk and the license is fetched fresh at playback to decrypt them — ordinary behaviour for a streaming player. Only *offline* playback needs a persistent license, which is a separate feature.
+Caching is unaffected by DRM on Android. media3 keeps `DrmSessionManager` and `CacheDataSource` orthogonal, so cached segments stay encrypted on disk and the license is fetched fresh at playback to decrypt them - ordinary behaviour for a streaming player. Only *offline* playback needs a persistent license, which is a separate feature.
 
 On iOS, caching is disabled for HLS playback, DRM or not, so `cacheEnabled: true` is ignored there. The cause is not DRM: the engine's cache serves bytes through a local proxy, and that proxy does not survive a signed FastPix URL. An unprotected stream fails outright with `CoreMediaErrorDomain error -12642`, a hard failure rather than a slow start. Other iOS formats still honour `cacheEnabled`.
 
@@ -345,7 +391,7 @@ The single delegate slot is a separate constraint. An `AVURLAsset` has exactly o
 
 #### Screen capture protection
 
-`secureScreen` applies Android's `FLAG_SECURE` while a DRM source plays, and is **on by default**. The flag belongs to the Activity, so the whole host app is unscreenshottable until the player is disposed — set it to `false` if screenshots elsewhere in your app must keep working.
+`secureScreen` applies Android's `FLAG_SECURE` while a DRM source plays, and is **on by default**. The flag belongs to the Activity, so the whole host app is unscreenshottable until the player is disposed - set it to `false` if screenshots elsewhere in your app must keep working.
 
 ```dart
 FastPixPlayerDrmConfiguration(
@@ -358,7 +404,7 @@ No effect on iOS, where FairPlay already blanks protected video in recordings.
 
 #### DRM Error Handling
 
-An unusable DRM setup is rejected before playback starts: `initialize` throws a `FastPixDrmException` and also emits a `FastPixPlayerDrmErrorEvent`, so a bad configuration surfaces immediately instead of as an endless spinner. Only three codes are reachable this way — a missing DRM token, a missing playback token, and an unsupported platform — and the check runs only when the data source carries a DRM configuration at all. Every other code below is classified from a platform error, so it arrives after playback has already been attempted.
+An unusable DRM setup is rejected before playback starts: `initialize` throws a `FastPixDrmException` and also emits a `FastPixPlayerDrmErrorEvent`, so a bad configuration surfaces immediately instead of as an endless spinner. Only three codes are reachable this way - a missing DRM token, a missing playback token, and an unsupported platform - and the check runs only when the data source carries a DRM configuration at all. Every other code below is classified from a platform error, so it arrives after playback has already been attempted.
 
 ```dart
 try {
@@ -393,7 +439,7 @@ The most recent DRM failure stays available on the controller as `controller.las
 | `FP_DRM_MISSING_DRM_TOKEN` | `drmConfiguration.drmToken` is empty |
 | `FP_DRM_MISSING_PLAYBACK_TOKEN` | The playback `token` on the data source is empty |
 | `FP_DRM_UNSUPPORTED_PLATFORM` | Widevine requested on iOS, or FairPlay on Android |
-| `FP_DRM_LICENSE_UNAUTHORIZED` | The license server rejected the request — expired or invalid DRM token |
+| `FP_DRM_LICENSE_UNAUTHORIZED` | The license server rejected the request - expired or invalid DRM token |
 | `FP_DRM_LICENSE_REQUEST_FAILED` | The license request failed (network, 5xx, timeout) |
 | `FP_DRM_CERTIFICATE_REQUEST_FAILED` | The FairPlay application certificate could not be fetched |
 | `FP_DRM_PROVISIONING_FAILED` | The device could not be provisioned with the DRM provider |
@@ -404,7 +450,7 @@ The most recent DRM failure stays available on the controller as `controller.las
 
 #### DRM Error UI and Diagnostics
 
-`FastPixPlayer` renders its own failure state and can probe the FastPix manifest, license and certificate endpoints to explain the failure — the platform players report every load failure with the same opaque message, so the probe separates a bad playback ID (manifest 404) from an expired playback token (manifest 403) from a rejected DRM token (license 401/403).
+`FastPixPlayer` renders its own failure state and can probe the FastPix manifest, license and certificate endpoints to explain the failure - the platform players report every load failure with the same opaque message, so the probe separates a bad playback ID (manifest 404) from an expired playback token (manifest 403) from a rejected DRM token (license 401/403).
 
 ```dart
 FastPixPlayer(
@@ -425,7 +471,7 @@ debugPrint(diagnosis?.probes.join(' · ')); // Per-endpoint results
 
 ## Preloading and Precaching
 
-Two independent optimisations for the tap-to-first-frame path. Both are **best effort and never a precondition**: every failure — a timeout, a refused adoption, an exhausted decoder budget, a missing platform channel — falls through to exactly the playback you get today. Neither can make playback fail or wait, and both report on their own event channel so a warm-up that did not finish never surfaces as a playback error.
+Two independent optimisations for the tap-to-first-frame path. Both are **best effort and never a precondition**: every failure - a timeout, a refused adoption, an exhausted decoder budget, a missing platform channel - falls through to exactly the playback you get today. Neither can make playback fail or wait, and both report on their own event channel so a warm-up that did not finish never surfaces as a playback error.
 
 |  | Preloading | Precaching |
 | --- | --- | --- |
@@ -437,7 +483,7 @@ They share no state. Use them together rather than choosing between them.
 
 ### Preloading
 
-Declare what is coming next. `preload` takes the state of the world rather than a command — it diffs against what it already holds, cancels departures, keeps survivors, and starts only arrivals — so it is safe to call on every scroll frame.
+Declare what is coming next. `preload` takes the state of the world rather than a command - it diffs against what it already holds, cancels departures, keeps survivors, and starts only arrivals - so it is safe to call on every scroll frame.
 
 ```dart
 await FastPixPreloadManager.instance.preload(
@@ -455,11 +501,11 @@ await FastPixPreloadManager.instance.preload(
 
 **Every warm is capped at twelve seconds**, `FastPixPreloadManager.warmTimeout`. A warm that overruns is failed and logged, and playback cold-starts. Network warms run one at a time so they do not compete with each other for the same bandwidth.
 
-**The window is capped for `player`.** One on Android, three on iOS — `FastPixPreloadManager.maxPlayerWindow`. An Android warm is a whole ExoPlayer plus, for DRM, a `MediaDrm` session that the device caps separately. Requests past the cap are dropped rather than queued, and the clamp is logged, because exceeding it does not fail the preload — it fails live playback minutes later.
+**The window is capped for `player`.** One on Android, three on iOS - `FastPixPreloadManager.maxPlayerWindow`. An Android warm is a whole ExoPlayer plus, for DRM, a `MediaDrm` session that the device caps separately. Requests past the cap are dropped rather than queued, and the clamp is logged, because exceeding it does not fail the preload - it fails live playback minutes later.
 
 **Adoption requires a matching configuration.** Pass `initialize` the same `FastPixPlayerConfiguration` you passed `preload`. `BetterPlayerConfiguration` is final on the controller, so a player warmed for different controls or fit can never be corrected; a mismatch is refused and logged with both fingerprints, and playback cold-starts. Set `adoptPreloaded: false` on `initialize` to force a cold start when measuring baseline latency.
 
-A `player` warm is skipped, with a logged reason, while a Cast session is active (a local decoder would be spent on playback happening on the receiver), for live streams (a parked live player drifts behind the live edge), and for DRM when `warmDrm: false`. A `network` warm is subject to none of these — it holds no decoder and acquires no license. A source already in the window is left alone rather than re-warmed, under either strategy.
+A `player` warm is skipped, with a logged reason, while a Cast session is active (a local decoder would be spent on playback happening on the receiver), for live streams (a parked live player drifts behind the live edge), and for DRM when `warmDrm: false`. A `network` warm is subject to none of these - it holds no decoder and acquires no license. A source already in the window is left alone rather than re-warmed, under either strategy.
 
 ```dart
 FastPixPreloadManager.instance.statusOf(playbackId);  // queued | loading | ready | failed | cancelled
@@ -493,19 +539,19 @@ FastPixPrecacheManager.instance.statusOf(playbackId); // idle | cached | failed 
 FastPixPrecacheManager.instance.clearStatuses();
 ```
 
-`precacheManifest` never throws; it returns `idle`, `cached`, `failed` or `unsupported`. A platform that reports success but writes **zero bytes is treated as a failure** — the byte count is the honest signal, and `bytesWrittenFor` exposes it. A repeat request for something already cached or already in flight is coalesced and returns `cached` rather than fetching twice. `precacheAll` runs a list sequentially on purpose, since these requests share bandwidth with the video currently playing. A manifest is read up to `FastPixPrecacheManager.manifestByteCeiling`, 512 KB.
+`precacheManifest` never throws; it returns `idle`, `cached`, `failed` or `unsupported`. A platform that reports success but writes **zero bytes is treated as a failure** - the byte count is the honest signal, and `bytesWrittenFor` exposes it. A repeat request for something already cached or already in flight is coalesced and returns `cached` rather than fetching twice. `precacheAll` runs a list sequentially on purpose, since these requests share bandwidth with the video currently playing. A manifest is read up to `FastPixPrecacheManager.manifestByteCeiling`, 512 KB.
 
-Refused, with the reason reported, on platforms other than Android and iOS, for live sources (a live playlist is rewritten continuously, so a cached copy is stale on arrival), for `cacheEnabled: false`, and for DRM on iOS — caching there needs the asset's resource-loader delegate, which FairPlay already owns on protected content.
+Refused, with the reason reported, on platforms other than Android and iOS, for live sources (a live playlist is rewritten continuously, so a cached copy is stale on arrival), for `cacheEnabled: false`, and for DRM on iOS - caching there needs the asset's resource-loader delegate, which FairPlay already owns on protected content.
 
 **Android.** The master playlist is written into the same media3 cache playback reads from, so a warm feeds the next start. media3 keys HLS entries by request URI and offers no override for it, so this pays off while the URL is stable; if the playback token is re-resolved between the warm and playback, the entry is written under one key and read under another and the warm is silently unused. Preloading is unaffected by that, because it keys by playback ID in Dart.
 
-**iOS.** Playlists and the opening segments are fetched and stored on disk keyed by playback ID, which survives a token refresh. Playback does not yet read from that store, so on iOS precaching currently costs bandwidth and disk without shortening a later start — prefer preloading there today.
+**iOS.** Playlists and the opening segments are fetched and stored on disk keyed by playback ID, which survives a token refresh. Playback does not yet read from that store, so on iOS precaching currently costs bandwidth and disk without shortening a later start - prefer preloading there today.
 
 Events arrive as `FastPixPrecacheStartedEvent`, `…CachedEvent` and `…FailedEvent` on `FastPixPrecacheManager.instance.eventManager`. `…Cached` carries `bytesWritten`; `…Failed` carries the refusal `status` alongside its `reason`, which is how a genuine failure is told apart from an unsupported source.
 
 ### Watching what happened
 
-Both features fail silently by design, so every decision is logged — skips and refusals as loudly as successes. Logging is on in debug builds and silent in release; force it with `FastPixWarmLog.enabled = true`.
+Both features fail silently by design, so every decision is logged - skips and refusals as loudly as successes. Logging is on in debug builds and silent in release; force it with `FastPixWarmLog.enabled = true`.
 
 ```bash
 flutter run | grep -E "preloading|precaching"
@@ -519,7 +565,7 @@ The line worth grepping for is `ADOPTED`, and its absence is the difference betw
 
 Casting is not screen mirroring. The receiver fetches the stream itself, directly from FastPix, and `FastPixCastController` only sends it commands. Three consequences shape the whole API:
 
-- The stream URL has to be reachable by the receiver, so authentication must travel in the URL. `FastPixPlayerDataSource.url` already carries the playback token as a query parameter, but `headers` are **dropped** — the receiver makes its own request and never sees them.
+- The stream URL has to be reachable by the receiver, so authentication must travel in the URL. `FastPixPlayerDataSource.url` already carries the playback token as a query parameter, but `headers` are **dropped** - the receiver makes its own request and never sees them.
 - Local and remote playback are mutually exclusive. Use `startCastingFrom` and `stopCastingTo` to move between them rather than driving both players by hand.
 - DRM streams cannot be cast through Google's Default Media Receiver. See [DRM on Chromecast](#drm-on-chromecast).
 
@@ -558,7 +604,7 @@ Add the discovery permissions and the Cast framework configuration to `android/a
 </application>
 ```
 
-The runtime `NEARBY_WIFI_DEVICES` request is made by the SDK itself from `startDiscovery()`, once per app process — later discoveries only check the status, so a viewer who declined is not prompted again on every screen. The manifest entry is all your app has to add. Casting also needs Google Play Services — when it is missing or too old the failure arrives as `FP_CAST_PLAY_SERVICES_UNAVAILABLE`.
+The runtime `NEARBY_WIFI_DEVICES` request is made by the SDK itself from `startDiscovery()`, once per app process - later discoveries only check the status, so a viewer who declined is not prompted again on every screen. The manifest entry is all your app has to add. Casting also needs Google Play Services - when it is missing or too old the failure arrives as `FP_CAST_PLAY_SERVICES_UNAVAILABLE`.
 
 #### iOS
 
@@ -602,7 +648,7 @@ await cast.startDiscovery();
 
 ### Moving playback between the phone and the TV
 
-`startCastingFrom` connects, pauses the local player, and loads the stream on the receiver at the position playback had reached. The connection is established *before* local playback is touched, so a receiver that fails to connect leaves the phone playing exactly where it was; if the receiver connects but the stream fails to load, the session is torn down and the error is rethrown — so a load failure arrives as an exception, not as `false`. Local playback resumes only if it was playing when casting started; a source that was paused stays paused, at the right position.
+`startCastingFrom` connects, pauses the local player, and loads the stream on the receiver at the position playback had reached. The connection is established *before* local playback is touched, so a receiver that fails to connect leaves the phone playing exactly where it was; if the receiver connects but the stream fails to load, the session is torn down and the error is rethrown - so a load failure arrives as an exception, not as `false`. Local playback resumes only if it was playing when casting started; a source that was paused stays paused, at the right position.
 
 ```dart
 // Phone -> TV
@@ -625,9 +671,9 @@ try {
 await cast.stopCastingTo(playerController);
 ```
 
-Keep the `FastPixPlayer` widget mounted while casting — hide it rather than removing it. Unmounting tears down the platform player, and `stopCastingTo` then has nothing to hand playback back to; it reports `FP_CAST_RESUME_UNAVAILABLE` and the session still ends cleanly.
+Keep the `FastPixPlayer` widget mounted while casting - hide it rather than removing it. Unmounting tears down the platform player, and `stopCastingTo` then has nothing to hand playback back to; it reports `FP_CAST_RESUME_UNAVAILABLE` and the session still ends cleanly.
 
-Both a session and the discovered device list can change from outside the app — the Google Home app, another sender, the TV powering off — so treat `stateStream` and the cast events as the single source of truth rather than assuming a command succeeded.
+Both a session and the discovered device list can change from outside the app - the Google Home app, another sender, the TV powering off - so treat `stateStream` and the cast events as the single source of truth rather than assuming a command succeeded.
 
 ### Controlling the receiver
 
@@ -665,7 +711,7 @@ await cast.selectTextTrack(track);   // only tracks from `textTracks`
 await cast.disableTextTrack();       // subtitles off
 ```
 
-The selection is not recorded locally — the receiver confirms it in its next media status, which is also how a change made from a TV remote or another sender arrives.
+The selection is not recorded locally - the receiver confirms it in its next media status, which is also how a change made from a TV remote or another sender arrives.
 
 ### Cast events
 
@@ -732,7 +778,7 @@ if (await cast.requiresNearbyDevicesPermission) {
 | `FP_CAST_INIT_FAILED` | The Google Cast context could not be created |
 | `FP_CAST_PLAY_SERVICES_UNAVAILABLE` | Google Play Services is missing or too old (Android) |
 | `FP_CAST_NEARBY_PERMISSION_DENIED` | The Android 13+ `NEARBY_WIFI_DEVICES` permission was not granted |
-| `FP_CAST_LOCAL_NETWORK_PERMISSION_DENIED` | The iOS local network permission was denied (reserved — iOS exposes no callback for it) |
+| `FP_CAST_LOCAL_NETWORK_PERMISSION_DENIED` | The iOS local network permission was denied (reserved - iOS exposes no callback for it) |
 | `FP_CAST_DISCOVERY_FAILED` | Discovery could not be started, stopped, or continued |
 | `FP_CAST_DEVICE_UNAVAILABLE` | The chosen receiver is no longer in the discovered list |
 | `FP_CAST_CONNECT_FAILED` | A session could not be established with the receiver |
@@ -750,7 +796,7 @@ if (await cast.requiresNearbyDevicesPermission) {
 
 ### DRM on Chromecast
 
-Chromecast receivers speak Widevine only — never FairPlay — and Google's Default Media Receiver cannot perform a license request at all. Loading a DRM protected source without a custom receiver is refused: `loadMedia` throws `UnsupportedError` and emits `FP_CAST_DRM_UNSUPPORTED`.
+Chromecast receivers speak Widevine only - never FairPlay - and Google's Default Media Receiver cannot perform a license request at all. Loading a DRM protected source without a custom receiver is refused: `loadMedia` throws `UnsupportedError` and emits `FP_CAST_DRM_UNSUPPORTED`.
 
 The refusal happens at load time, not before connecting. `startCastingFrom` connects to the receiver and pauses local playback first, so a DRM source tears the fresh session down again on the way out. Check for DRM yourself before offering the cast button if you would rather the receiver were never woken.
 
@@ -767,7 +813,7 @@ Your receiver application reads `loadRequest.media.customData.licenseUrl` and co
 
 ### Segment format
 
-A Cast receiver is a web player and has to know how the segments are packaged before it can build a playback pipeline. When the manifest does not make that obvious the receiver assumes MPEG-TS, and an fMP4/CMAF stream then connects, displays its title, and never starts playing — with no error on either side.
+A Cast receiver is a web player and has to know how the segments are packaged before it can build a playback pipeline. When the manifest does not make that obvious the receiver assumes MPEG-TS, and an fMP4/CMAF stream then connects, displays its title, and never starts playing - with no error on either side.
 
 If casting connects but nothing plays, this is almost always the cause:
 
@@ -775,19 +821,19 @@ If casting connects but nothing plays, this is almost always the cause:
 FastPixCastController(segmentFormat: FastPixCastSegmentFormat.fmp4);
 ```
 
-Modern packaging is fMP4/CMAF, and any stream serving both Widevine and FairPlay from one source — which is how FastPix DRM works — is CMAF. `FastPixCastSegmentFormat.auto` (the default) sends no hint and is correct for plain MPEG-TS streams.
+Modern packaging is fMP4/CMAF, and any stream serving both Widevine and FairPlay from one source - which is how FastPix DRM works - is CMAF. `FastPixCastSegmentFormat.auto` (the default) sends no hint and is correct for plain MPEG-TS streams.
 
 ### What does not survive the trip
 
 Because the receiver fetches and renders the stream itself, several data source options have no effect while casting:
 
-- `headers` are dropped — authentication has to be in the URL, which the FastPix playback token already is.
+- `headers` are dropped - authentication has to be in the URL, which the FastPix playback token already is.
 - Resolution hints (`resolution`, `minResolution`, `maxResolution`, `renditionOrder`) are sent as URL parameters, but adaptive switching is then the receiver's decision.
 - `cacheEnabled`, `loop` and `endAt` are local player behaviours with no receiver equivalent.
 
 ### Lifecycle
 
-`dispose()` releases every subscription and stream the controller opened but deliberately **does not end a live session** — a viewer who started casting expects the TV to keep playing when they leave the player screen. Call `disconnect()` first if the session should stop with the screen. For the same reason, hold the cast controller at app scope rather than rebuilding it per screen.
+`dispose()` releases every subscription and stream the controller opened but deliberately **does not end a live session** - a viewer who started casting expects the TV to keep playing when they leave the player screen. Call `disconnect()` first if the session should stop with the screen. For the same reason, hold the cast controller at app scope rather than rebuilding it per screen.
 
 ```dart
 await cast.stopDiscovery();
@@ -814,7 +860,7 @@ controller.autoPlayNext = true;
 controller.repeatMode = FastPixPlaylistRepeatMode.all;
 ```
 
-The same list can arrive as JSON — a top-level array of objects where
+The same list can arrive as JSON - a top-level array of objects where
 `playbackId` is required, every other field is optional and unknown keys are
 ignored.
 
@@ -847,7 +893,7 @@ does not interrupt what is playing.
 
 `repeatMode` decides what a finished item leads to: `off` stops at the last
 item and emits `playlistEnded`, `one` replays the active item without changing
-the index, and `all` wraps from the last item back to the first. The SDK suppresses automatic advance while a Cast session is connected, because the local player is not the surface being watched — but explicit navigation still works.
+the index, and `all` wraps from the last item back to the first. The SDK suppresses automatic advance while a Cast session is connected, because the local player is not the surface being watched - but explicit navigation still works.
 
 ### Playing a single source without a playlist
 
@@ -945,7 +991,7 @@ rule out is released, and one they now allow is made. A later `setPlaylist` or
 reach the engine, so they are not part of the [preload](#preloading-and-precaching)
 adoption fingerprint and changing them leaves the active and warm players alone.
 
-**What is prerendered.** Always the next item — the first item again after the
+**What is prerendered.** Always the next item - the first item again after the
 last with repeat `all`; nothing past the end with repeat `off`, and nothing with
 repeat `one`. One prerender at a time per controller. Moving anywhere else
 releases it, and an item that is already a warm preloaded player is reused
@@ -964,7 +1010,7 @@ await controller.loadPlaybackId(nextSource);            // promotes it when read
 `errorCode` saying why.
 
 **When it is skipped.** Each skip is reported with a `FastPixPrerenderErrorCode`
-and the transition falls back to the normal path — a warm player when one exists,
+and the transition falls back to the normal path - a warm player when one exists,
 otherwise a cold start:
 
 | Case | Code |
@@ -984,18 +1030,18 @@ otherwise a cold start:
 A prerender that started and could not finish fails with `loadFailed`,
 `timedOut` (no first frame within `FastPixPreloadManager.warmTimeout`),
 `seekFailed` or `surfaceUnavailable`. A prerender already held is released when
-a policy above starts to apply — PiP opening, a Cast session starting, the
-app leaving the foreground, memory pressure — and made again once
-it no longer does.
+a policy above starts to apply - PiP opening, a Cast session starting, the
+app leaving the foreground, memory pressure - and made again once it no
+longer does.
 
-The hidden player is kept out of Picture-in-Picture and Now Playing;
-only the active item is ever seen or heard there.
+The hidden player is kept out of Picture-in-Picture and Now Playing; only the
+active item is ever seen or heard there.
 
 **Events.** `prerenderRequested` (`FastPixPrerenderRequestedEvent`, with
 `automatic` true when the playlist asked for it), `prerenderReady`
 (`FastPixPrerenderReadyEvent`, with `timeToFirstFrame`) and `prerenderFailed`
 (`FastPixPrerenderFailedEvent`, with `code` and `message`, for skips and
-failures alike — `prerenderStatusOf` tells them apart). Each names the
+failures alike - `prerenderStatusOf` tells them apart). Each names the
 prerendered source's `playbackId` and `playlistIndex`, not the active item's,
 and none of them is a playback error.
 
@@ -1044,8 +1090,8 @@ await controller.skipCurrentSegment(); // false when nothing is active
 ```
 
 The SDK holds segments until the item's duration is known, then validates them
-once at that point, because two of the four rules — a start at or beyond the
-duration, an end beyond it — need a duration that does not exist when the
+once at that point, because two of the four rules - a start at or beyond the
+duration, an end beyond it - need a duration that does not exist when the
 playlist is supplied. The SDK rejects an invalid segment on its own with a
 `skipFailed` event that names the reason, and its valid siblings keep working.
 On a live source, where the duration never settles, segments stay pending: the
@@ -1082,7 +1128,7 @@ uses the bundled `fastPixDefaultPipLayout`.
 
 ### Picture-in-Picture platform setup
 
-Android — mark the activity as PiP capable and let it handle the configuration
+Android - mark the activity as PiP capable and let it handle the configuration
 changes itself, in `android/app/src/main/AndroidManifest.xml`:
 
 ```xml
@@ -1093,7 +1139,7 @@ changes itself, in `android/app/src/main/AndroidManifest.xml`:
     ... >
 ```
 
-iOS — PiP keeps playing while the app is in the background, which needs the
+iOS - PiP keeps playing while the app is in the background, which needs the
 audio background mode in `ios/Runner/Info.plist`:
 
 ```xml
@@ -1160,7 +1206,7 @@ controller.toggleFullscreen();
 await controller.toggleCast();
 ```
 
-Call `cancelScrub()` when the seek bar goes away mid-drag — entering fullscreen
+Call `cancelScrub()` when the seek bar goes away mid-drag - entering fullscreen
 or PiP rebuilds the controls, and Flutter disposes the old slider without
 calling its end callback, so `endScrub` never arrives. Without it the scrub
 target stands in for the playhead until the next drag. It seeks nowhere and
@@ -1183,14 +1229,11 @@ or `pipFailed`.
 
 ### When playback fails
 
-A source that cannot play produces no picture, so `FastPixVideoSurface` draws a
-failure panel in its place — an icon, the failure's headline and its code.
-Without it the surface would answer a permanent failure with the same blank box
-it uses for "still loading", and neither the viewer nor you could tell the two
-apart.
-
-Replace it with `errorBuilder`, or return a `SizedBox.shrink()` from one to draw
-nothing and render your own from the `error` event:
+`FastPixVideoSurface` draws no failure panel of its own. A playback failure is
+reported on the `error` event and on `controller.lastError`, and the surface
+keeps drawing what it was drawing - the video box or the placeholder. What the
+viewer sees about the failure is yours to draw, over the surface or through
+`errorBuilder`, which replaces the surface once playback has failed:
 
 ```dart
 FastPixVideoSurface(
@@ -1203,29 +1246,23 @@ FastPixVideoSurface(
 )
 ```
 
-Only failures that actually stopped playback are drawn. The
+Only failures that actually stopped playback reach `errorBuilder`. The
 `FastPixCustomUIErrorCode` failures above share the same `error` channel but
-never reach the panel, because playback did not stop — a cast route that could
-not be offered must not replace a playing video. The test for it is
+never replace the surface, because playback did not stop - a cast route that
+could not be offered must not replace a playing video. The test for it is
 `controller.lastError`, which those failures deliberately do not set.
 
-The platform players report every load failure as the same opaque string —
-`Source error` — so the panel also runs the same diagnosis probe the default
-skin does, and for the same reason: without it the only honest headline is
-"Playback failed", which is what the viewer could already see. The probe
-re-requests the manifest and, for a protected source, the licence and
-certificate endpoints, separating a bad playback ID (manifest 404) from an
-expired playback token (403) from a rejected licence (401/403). The detail line
-shows "Working out why…" while it runs, then the answer; the headline never
-changes, because a message that rewrites itself reads as the first one having
-been wrong.
-
-Turn it off with `diagnoseErrors: false` to make no network request on a
-failure — `controller.diagnosePlayback()` is then yours to call.
+The platform players report every load failure as the same opaque string -
+`Source error`. To find the real cause, call `controller.diagnosePlayback()`
+from your own failure UI: it re-requests the manifest and, for a protected
+source, the licence and certificate endpoints, separating a bad playback ID
+(manifest 404) from an expired playback token (403) from a rejected licence
+(401/403). The surface's `diagnoseErrors` parameter has no effect and is kept
+only so existing code still compiles.
 
 ## Seek preview (spritesheets)
 
-FastPix generates spritesheets — grids of thumbnails — for every on-demand
+FastPix generates spritesheets - grids of thumbnails - for every on-demand
 video. The player loads the active source's spritesheet in the background and
 gives a custom seek bar a thumbnail for any position.
 
@@ -1233,7 +1270,7 @@ gives a custom seek bar a thumbnail for any position.
 50 or 100 tiles and their spacing from the video's length.
 
 **Advanced spritesheet.** Opt in for a thumbnail every 1 to 10 seconds. When it
-is on, only the advanced spritesheet is loaded — the normal one is not used
+is on, only the advanced spritesheet is loaded - the normal one is not used
 first or as a fallback. An interval outside 1 to 10 uses 10.
 
 ```dart
@@ -1261,8 +1298,8 @@ if (controller.isScrubbing)
 ```
 
 `FastPixSeekPreview` draws the tile for the position. While no image is
-available — spritesheets disabled, a live source, still loading or generating,
-or a failure — it shows only the time. It never shows a spinner or an error.
+available - spritesheets disabled, a live source, still loading or generating,
+or a failure - it shows only the time. It never shows a spinner or an error.
 The example app's `FastPixSeekBar` shows the full pattern.
 
 To draw thumbnails yourself, `controller.spritesheetTileAt(position)` returns
@@ -1300,7 +1337,7 @@ spritesheet requests; without one they fail with `unauthorized`.
   a long video.
 - The first request for a new advanced interval makes FastPix generate it.
   That took about two minutes for an 80-minute video, while the player retries
-  for about 30 seconds (after 1, 2, 4, 8 and 15 s) — so the first viewer of a
+  for about 30 seconds (after 1, 2, 4, 8 and 15 s) - so the first viewer of a
   new interval usually sees only the time, and later viewers see thumbnails.
 - Images too large to decode at full size on a phone are decoded at a reduced
   size; tiles look softer but stay correct.
@@ -1366,14 +1403,14 @@ The main controller class that manages the player state and configuration:
 - `play()`, `pause()`, `togglePlayPause()`, `seekTo(position)`, `setVolume(volume)`
 - `seekForward([offset])` / `seekBackward([offset])`: Jump by `offset`, 10 seconds by default, clamped to the source
 - `setPlaybackRate(rate)`, `playbackRate`, `supportedPlaybackRates`
-- `playbackState` / `playbackStateStream`: A `FastPixPlaybackState` snapshot — position, duration, buffered position, playing, buffering, rate
+- `playbackState` / `playbackStateStream`: A `FastPixPlaybackState` snapshot - position, duration, buffered position, playing, buffering, rate
 - `beginScrub([position])`, `updateScrub(position)`, `endScrub(position)`, `cancelScrub()`, `isScrubbing`
 - `enterFullscreen()`, `exitFullscreen()`, `toggleFullscreen()`, `isFullscreen`
 
 #### Seek preview
 - `spritesheet`: The active source's `FastPixSpritesheet`, or `null`
 - `spritesheetStream`: Emits when metadata loads, again when the image is ready, and `null` on a source change
-- `spritesheetStatus`: `idle`, `loading`, `ready` or `failed` — see [Seek preview](#seek-preview-spritesheets)
+- `spritesheetStatus`: `idle`, `loading`, `ready` or `failed` - see [Seek preview](#seek-preview-spritesheets)
 - `spritesheetTileAt(position)`: The `FastPixSpritesheetTile` covering a position, or `null`
 
 #### Tracks and quality
@@ -1395,7 +1432,7 @@ The main controller class that manages the player state and configuration:
 
 #### Prerendering
 - `prerender(source)`: Prerender a source on a hidden surface; completes with a `FastPixPrerenderResult` (`status`, `errorCode`). Never throws
-- `cancelPrerender(playbackId)`, `prerenderStatusOf(playbackId)`: A `FastPixPrerenderStatus` — `idle`, `preparing`, `frameReady`, `skipped`, `failed`, `released`
+- `cancelPrerender(playbackId)`, `prerenderStatusOf(playbackId)`: A `FastPixPrerenderStatus` - `idle`, `preparing`, `frameReady`, `skipped`, `failed`, `released`
 - `updatePrerenderConfiguration(configuration)`: Change the prerender settings at runtime, without a reload
 
 #### Skip segment control
@@ -1403,7 +1440,7 @@ The main controller class that manages the player state and configuration:
 - `skipCurrentSegment()`: Jump to the end of the active segment, reporting whether playback moved
 
 #### Picture-in-Picture control
-- `pip`: The `FastPixPipManager` — `enterPip()`, `exitPip()`, `togglePip()`, `isPipActive`, `isPipAvailable()`, `enabled`, `autoEnterOnBackground`, `setPipAudioBehavior(mixWithOthers:)`
+- `pip`: The `FastPixPipManager` - `enterPip()`, `exitPip()`, `togglePip()`, `isPipActive`, `isPipAvailable()`, `enabled`, `autoEnterOnBackground`, `setPipAudioBehavior(mixWithOthers:)`
 
 #### Cast
 - `cast`, `attachCastController(controller)`, `isCasting`, `toggleCast()`
@@ -1430,22 +1467,22 @@ The main data source class that handles streaming configuration:
 #### Optional Parameters
 - `title`: Optional title for the stream
 - `description`: Optional description
-- `customDomain`: Custom streaming domain, as a full host (defaults to `stream.fastpix.com`). The seek-preview images host is derived from it — see [Seek preview](#seek-preview-spritesheets)
-- `thumbnailUrl`: The image sent to a Chromecast receiver, as an `http(s)` URL; `videoData.thumbnailUrl` is used when it is `null`
+- `customDomain`: Custom streaming domain, as a full host (defaults to `stream.fastpix.com`). The seek-preview images host is derived from it - see [Seek preview](#seek-preview-spritesheets)
+- `thumbnailUrl`: The image sent to a Chromecast receiver. When unset, Cast falls back to `videoData.thumbnailUrl`
 - `token`: Authentication token for protected streams ([how to generate](https://fastpix.com/docs/video-security/generate-jwts-for-secure-media))
 - `drmConfiguration`: DRM configuration for protected media. Requires `token` to be set as well
 - `streamType`: `StreamType.onDemand` (default) or `StreamType.live`
 - `duration`: The video's duration, when known ahead of playback
 - `headers`: Optional HTTP headers for authentication
-- `cacheEnabled`: Enable/disable the player's playback cache (default `true`). Honoured on Android, including for DRM sources; ignored on iOS HLS, where the engine's caching proxy does not survive a signed FastPix URL — see [DRM Protected Media](#drm-protected-media). This flag covers caching *during* playback only — caching a source ahead of time is a separate API, `FastPixPrecacheManager`
+- `cacheEnabled`: Enable/disable the player's playback cache (default `true`). Honoured on Android, including for DRM sources; ignored on iOS HLS, where the engine's caching proxy does not survive a signed FastPix URL - see [DRM Protected Media](#drm-protected-media). This flag covers caching *during* playback only - caching a source ahead of time is a separate API, `FastPixPrecacheManager`
 - `cacheDirectory`, `maxCacheSize`: Where the playback cache lives and how large it may grow
 - `bufferingConfiguration`: How much media is buffered before the first frame and ahead of the playhead. Defaults to the engine's own values; `fastPixPlayStartBuffering` trades a larger starting buffer for a faster first frame. Android only, and part of the preload adoption fingerprint
 - `loop`: Enable/disable video looping
-- `resolution`, `minResolution`, `maxResolution`, `renditionOrder`: Quality parameters, sent to FastPix as URL parameters — see [Quality Control](#quality-control)
+- `resolution`, `minResolution`, `maxResolution`, `renditionOrder`: Quality parameters, sent to FastPix as URL parameters - see [Quality Control](#quality-control)
 - `subtitles`: External subtitle files, as `FastPixPlayerSubtitle`s, offered alongside any the manifest declares. Also sent to a Chromecast receiver
 - `useHlsSubtitles`: Whether captions declared inside the HLS manifest are offered (default `true`)
-- `showSubtitles`: Whether an external track is selected before playback starts — the `isDefault` one, else the first. In-manifest tracks are offered but start off
-- `skipSegments`: Intro, recap, song and credits ranges the player offers to skip — see [Skip segments](#skip-segments)
+- `showSubtitles`: Whether an external track is selected before playback starts - the `isDefault` one, else the first. In-manifest tracks are offered but start off
+- `skipSegments`: Intro, recap, song and credits ranges the player offers to skip - see [Skip segments](#skip-segments)
 - `startAt`: Where playback of this source begins, or `null` for the start. The player is positioned there before the first frame is shown, so a resumed video never flashes its opening seconds, and a playlist item carrying one starts there every time it is loaded
 - `endAt`: Where playback of this source ends
 - `videoData`, `customData`: Metadata sent to FastPix analytics
@@ -1462,14 +1499,14 @@ The main data source class that handles streaming configuration:
 ### FastPixPlayerConfiguration
 
 Main configuration class for player behaviour. The first three parameters are
-positional and required — they identify the stream to FastPix analytics.
+positional and required - they identify the stream to FastPix analytics.
 
 - `workSpaceId`, `viewerId`, `beaconUrl` (positional, required)
 - `controlsConfiguration`: A `FastPixPlayerControlsConfiguration`
 - `qualityConfiguration`: A `FastPixPlayerQualityConfiguration`
-- `spritesheetConfiguration`: A `FastPixPlayerSpritesheetConfiguration` — `enableSpritesheet` (default `true`), `enableAdvancedSpritesheet` (default `false`), `advancedSpritesheetInterval` (1 to 10, default `10`)
+- `spritesheetConfiguration`: A `FastPixPlayerSpritesheetConfiguration` - `enableSpritesheet` (default `true`), `enableAdvancedSpritesheet` (default `false`), `advancedSpritesheetInterval` (1 to 10, default `10`)
 - `videoFit`: `FastPixVideoFit.contain` (default) or `cover`. See [Aspect Ratio](#aspect-ratio)
-- `prerenderConfiguration`: A `FastPixPlayerPrerenderConfiguration` — `enablePrerender` (default `true`), `prerenderOnCellular` (default `true`). See [Prerendering](#prerendering)
+- `prerenderConfiguration`: A `FastPixPlayerPrerenderConfiguration` - `enablePrerender` (default `true`), `prerenderOnCellular` (default `true`). See [Prerendering](#prerendering)
 - `enableNowPlaying` (default `true`): Shows the playing source on the lock screen and in Control Center (title, duration, position), with play, pause and seek from there. Turn it off if your app manages Now Playing itself. iOS only; ignored elsewhere
 - `copyWith()`: Create a copy with updated values
 
@@ -1495,7 +1532,7 @@ DRM configuration for protected media:
 #### Optional Parameters
 - `drmType`: DRM system to use. Defaults to FairPlay on iOS and Widevine everywhere else
 - `headers`: Additional headers sent with the license request
-- `secureScreen`: Block screenshots and screen recording while this source plays (default `true`). Android only, and window wide — see [Screen capture protection](#screen-capture-protection)
+- `secureScreen`: Block screenshots and screen recording while this source plays (default `true`). Android only, and window wide - see [Screen capture protection](#screen-capture-protection)
 
 #### Members
 - `resolvedDrmType`: DRM system for the current platform, honouring an explicit `drmType`
@@ -1563,11 +1600,11 @@ Drives Chromecast playback for a FastPix stream.
 - `connectedDevice`: The receiver currently playing, or `null`
 - `isConnected`, `isRemotePlaying`, `hasCustomReceiver`
 - `remotePosition` / `remotePositionStream`: Position reported by the receiver
-- `remoteVolume` / `remoteVolumeStream`: Volume as this app last set it — external changes are invisible
+- `remoteVolume` / `remoteVolumeStream`: Volume as this app last set it - external changes are invisible
 - `textTracks` / `textTracksStream`: Subtitle tracks the receiver is offering
 - `activeTextTrack`: The selected subtitle track, or `null` when off
 - `activeTextTrackStream`: The selected track's **ID**, not the track itself, or `null` each time subtitles go off
-- `remotePositionStream`: Does not replay its latest value to a new listener — seed your UI from `remotePosition` when you subscribe
+- `remotePositionStream`: Does not replay its latest value to a new listener - seed your UI from `remotePosition` when you subscribe
 - `lastError`: Most recent `FastPixCastErrorEvent`, or `null`
 
 #### Permissions
@@ -1627,7 +1664,7 @@ Thrown when a playlist cannot be played:
 The active source's seek-preview sheet, and one tile in it:
 
 - Sheet: `type` (`normal` or `advanced`), `imageUrl`, `tileWidth`, `tileHeight`, `duration`, `interval` (advanced only), `tiles`, `tileAt(position)`
-- Tile: `index`, `start`, `end`, `region` — the tile's rectangle in the image
+- Tile: `index`, `start`, `end`, `region` - the tile's rectangle in the image
 
 ### FastPixPlaybackState
 
@@ -1650,9 +1687,9 @@ Emitted for every cast failure:
 - `code`: Stable string code, e.g. `FP_CAST_CONNECT_TIMEOUT`
 - `message`: Human readable, actionable description
 - `underlyingError`: Raw platform error string, when the failure came from the Cast SDK
-- `isFatal`: Casting is unusable until the user changes something outside the app — hide the cast button
+- `isFatal`: Casting is unusable until the user changes something outside the app - hide the cast button
 - `isPermissionRelated`: Fixable from the system settings app; pair with `openPermissionSettings()`
-- `isContentUnsupported`: This content can never play on a receiver — do not offer a retry
+- `isContentUnsupported`: This content can never play on a receiver - do not offer a retry
 - `isRetryable`: The same action may succeed if simply tried again
 
 ### Widgets
@@ -1662,28 +1699,28 @@ The player with the bundled control skin.
 
 - `controller` (required): The player controller
 - `width`, `height`: Fixed size
-- `aspectRatio`, `matchVideoAspectRatio`: The player's shape — 16:9 by default. See [Aspect Ratio](#aspect-ratio)
+- `aspectRatio`, `matchVideoAspectRatio`: The player's shape - 16:9 by default. See [Aspect Ratio](#aspect-ratio)
 - `showLoadingIndicator` (default `true`), `loadingIndicatorColor`
 - `placeholderWidgetBuilder`: What is drawn before the first frame
 - `castController`, `onCastPressed`: Put the cast glyph in the control bar. See [Player Widget With A Cast Button](#player-widget-with-a-cast-button)
-- `castOverlayBuilder`: Replaces what is drawn while playback is on a Chromecast
+- `castOverlayBuilder`: Replace what is drawn while playback is on a Chromecast
 - `pipBuilder`: Content for the Picture-in-Picture window
 - `drmErrorWidgetBuilder`: Builder for the DRM failure state. Takes precedence over `errorWidgetBuilder` for DRM failures
 - `errorWidgetBuilder`: Builder for the generic failure state
 - `diagnoseErrors`: Whether to probe the FastPix endpoints after a failure to work out its real cause (default `true`)
 
 #### FastPixVideoSurface
-Headless video surface for a custom UI — video, plus the failure panel, and nothing else.
+Headless video surface for a custom UI - the video and nothing else.
 
 - `controller` (required): The player controller
-- `aspectRatio`, `matchVideoAspectRatio`: The surface's shape — 16:9 by default. See [Aspect Ratio](#aspect-ratio)
+- `aspectRatio`, `matchVideoAspectRatio`: The surface's shape - 16:9 by default. See [Aspect Ratio](#aspect-ratio)
 - `backgroundColor` (default black), `placeholder`: What is drawn behind and before the first frame
 - `pipBuilder`: Content for the Picture-in-Picture window
-- `errorBuilder`: Replaces the failure panel. See [When playback fails](#when-playback-fails)
-- `diagnoseErrors`: Whether the failure panel probes the FastPix endpoints (default `true`)
+- `errorBuilder`: Replaces the surface once playback has failed. See [When playback fails](#when-playback-fails)
+- `diagnoseErrors`: No effect; kept so existing code still compiles
 
 #### FastPixSeekPreview
-Seek-preview thumbnail for a position — the tile, or only the time when no image is available.
+Seek-preview thumbnail for a position - the tile, or only the time when no image is available.
 
 - `controller`, `position` (required)
 - `width`: Thumbnail width; height follows the tile's aspect ratio (default `160`)
@@ -1721,7 +1758,7 @@ The playlist queue drawn over the video, with the active item marked.
 #### FastPixCastState
 - `unavailable`: Casting cannot be used on this device at all
 - `noDevices`: Cast is ready but no receiver has been discovered yet
-- `devicesFound`: At least one receiver is available — show the cast button
+- `devicesFound`: At least one receiver is available - show the cast button
 - `connecting`: A session is being established
 - `connected`: A session is live; the receiver is playing the stream
 - `error`: Discovery or the session failed; the reason is on `lastError`
@@ -1732,6 +1769,53 @@ Extension getters for gating cast UI: `canCast`, `isCasting`, `hasSession`.
 - `auto`: Send no hint and let the receiver work it out (default)
 - `fmp4`: fMP4 / CMAF segments
 - `mpegTs`: Classic MPEG-TS segments
+
+## Which FastPix SDK for Flutter
+
+This repository is the playback SDK. For the other parts of a FastPix Flutter app, use the matching SDK:
+
+| What you want to do | FastPix SDK |
+| --- | --- |
+| Play FastPix HLS video in a Flutter app | **fastpix_video_player** (this repository) |
+| Upload video from a Flutter app | [FastPix/flutter-uploads](https://github.com/FastPix/flutter-uploads) - chunked, resumable uploads |
+| Add FastPix analytics to a BetterPlayer-based player | [FastPix/flutter-data-better-player](https://github.com/FastPix/flutter-data-better-player) |
+| Core Flutter video analytics and event tracking | [FastPix/flutter-core-data-sdk](https://github.com/FastPix/flutter-core-data-sdk) |
+
+## FAQ
+
+**How do I add an HLS video player to a Flutter app?**
+Install `fastpix_video_player`, create an HLS data source from a FastPix playback ID with `FastPixPlayerDataSource.hls(...)`, and drop a `FastPixPlayer` widget into your widget tree. See [Play your first video](#basic-usage-example).
+
+**How do I play an .m3u8 (HLS) stream in Flutter?**
+Create the data source with a FastPix playback ID; the SDK builds the HLS (.m3u8) stream URL for you. You do not pass a raw .m3u8 URL. See [Public Media](#public-media).
+
+**Does the Flutter player support DRM (Widevine and FairPlay)?**
+Yes. DRM-protected media plays through the FastPix license server, with Widevine on Android and FairPlay on iOS, configured through `drmConfiguration`. See [DRM Protected Media](#drm-protected-media).
+
+**How do I cast video from Flutter to a Chromecast?**
+Use `FastPixCastController` to discover receivers and hand playback between the phone and the TV with `startCastingFrom` and `stopCastingTo`. See [Chromecast](#chromecast).
+
+**Is this a replacement for the `video_player` package or Chewie?**
+No. Flutter's `video_player` plugin and UI wrappers like Chewie are for playing a video file or a plain network stream. This SDK is a hosted-streaming player for FastPix-delivered HLS, with DRM, live, Chromecast and QoE analytics built in. Use it when you stream from FastPix and want those features without assembling them yourself.
+
+**Does it work with live streaming?**
+Yes. Set `streamType: StreamType.live` on the data source. See [Public Media](#public-media).
+
+**Does it track video analytics and quality of experience (QoE)?**
+Yes. Every player reports startup time, rebuffering, bitrate and errors to the FastPix dashboard, using the `workspaceId`, `viewerId` and `beaconUrl` you pass to `FastPixPlayerConfiguration`.
+
+**Does it support picture-in-picture?**
+Yes, on Android and iOS. See [Picture-in-Picture](#picture-in-picture).
+
+**Which platforms are supported?**
+Android and iOS. Chromecast works on both.
+
+## Documentation
+
+- [Install the FastPix Flutter Player](https://fastpix.com/docs/flutter-player/install-fastpix-flutter-player)
+- [Secure video playback](https://fastpix.com/docs/web-player/secure-video-playback) and [generate JWTs for secure media](https://fastpix.com/docs/video-security/generate-jwts-for-secure-media)
+- [Set up DRM encryption](https://fastpix.com/docs/video-security/set-up-drm-encryption)
+- [Video Data (QoE analytics) overview](https://fastpix.com/docs/video-data/overview)
 
 ## Additional Information
 

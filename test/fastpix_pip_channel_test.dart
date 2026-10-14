@@ -45,6 +45,7 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
     FastPixPipChannel.debugReset();
+    FastPixPipManager.debugResetPlatformEnabled();
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -164,11 +165,49 @@ void main() {
       expect(methods(), contains('exit'));
     });
 
-    test('a disabled manager asks the platform for nothing', () async {
+    test('a disabled manager tells the platform once, then asks for nothing',
+        () async {
       final pip = build(FastPixPlayerEventManager())..enabled = false;
       await pip.exitPip();
       await pip.enterPip();
+      // iOS must hear it: it can open a window by itself otherwise.
+      expect(methods(), ['setEnabled']);
+      expect(calls.single.arguments, {'enabled': false});
+    });
+  });
+
+  group('switching PiP off entirely', () {
+    test('a manager left enabled sends nothing', () async {
+      final pip = build(FastPixPlayerEventManager());
+      pip.enabled = true;
+      await Future<void>.delayed(Duration.zero);
       expect(methods(), isEmpty);
+    });
+
+    test('switching off closes an open window', () async {
+      final pip = build(FastPixPlayerEventManager());
+      await FastPixPipChannel.debugSendState(active: true);
+      pip.enabled = false;
+      await Future<void>.delayed(Duration.zero);
+      expect(methods(), containsAllInOrder(['setEnabled', 'exit']));
+    });
+
+    test('switching back on re-allows the platform', () async {
+      final pip = build(FastPixPlayerEventManager())..enabled = false;
+      pip.enabled = true;
+      await Future<void>.delayed(Duration.zero);
+      expect(methods(), ['setEnabled', 'setEnabled']);
+      expect(calls[0].arguments, {'enabled': false});
+      expect(calls[1].arguments, {'enabled': true});
+    });
+
+    test('a manager built after another switched PiP off is not off',
+        () async {
+      build(FastPixPlayerEventManager()).enabled = false;
+      build(FastPixPlayerEventManager());
+      await Future<void>.delayed(Duration.zero);
+      expect(calls.last.method, 'setEnabled');
+      expect(calls.last.arguments, {'enabled': true});
     });
   });
 

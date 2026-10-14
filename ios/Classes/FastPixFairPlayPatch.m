@@ -188,11 +188,61 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
     return self;
 }
 
+/// How many times one licence acquisition may be attempted.
+///
+/// A licence server that answers 500 once and 200 a moment later is a fact of
+/// this deployment, not a hypothetical: two 500s were observed in a row on
+/// 2026-09-22 while the certificate fetch on the same asset succeeded, and the
+/// title played on the third try. Without a retry here the *only* retry is
+/// AVFoundation's, which re-issues the key request roughly every 20 seconds and
+/// re-fetches the certificate each time, which a viewer sees as tens of seconds
+/// of black before a protected title starts.
+static const NSUInteger kFastPixLicenceMaxAttempts = 3;
+
+/// Waits between attempts. One entry per retry, so this array is one shorter
+/// than [kFastPixLicenceMaxAttempts].
+///
+/// Short on purpose. This is a transient-error backoff on the tap path, not a
+/// congestion control: a server that needs more than a second and a half to
+/// stop throwing is not going to be waited out inside a resource-loader call.
+static const NSTimeInterval kFastPixLicenceBackoff[] = {0.4, 1.2};
+
+/// The ceiling on *all* attempts together, including their backoffs.
+///
+/// Unchanged from the single-attempt version, and that is the point: the
+/// loader queue this blocks is serial (`BetterPlayer.swift:198`), so every key
+/// request in the process waits behind this one. Retrying must not extend how
+/// long that queue can be held — it divides the existing budget rather than
+/// multiplying it.
+static const NSTimeInterval kFastPixLicenceTotalBudget = 30.0;
+
+/// The longest any single attempt may take, so a first attempt that hangs
+/// cannot consume the whole budget and leave nothing for a retry.
+static const NSTimeInterval kFastPixLicenceAttemptTimeout = 10.0;
+
+/// Whether an outcome is worth trying again.
+///
+/// 5xx and a transport failure are; a 4xx is not. An expired token, a licence
+/// issued for another playback id and a malformed SPC all answer 4xx, and
+/// retrying those spends the budget to be refused three times — while the
+/// viewer waits.
+static BOOL FastPixLicenceIsRetryable(NSInteger status, BOOL transportFailed) {
+    return transportFailed || status >= 500 || status <= 0;
+}
+
 /// POST the SPC to the licence server and return the CKC.
 ///
-/// Synchronous by necessity: `AVAssetResourceLoaderDelegate` expects the
-/// loading request to be answered before this returns, which is why the engine
-/// blocks here too.
+/// Blocking, and that is now fine: it runs on [FastPixFairPlayLoader
+/// licenceQueue], never on the engine's loader queue.
+///
+/// It used to run inline in the delegate callback under the comment
+/// "synchronous by necessity: `AVAssetResourceLoaderDelegate` expects the
+/// loading request to be answered before this returns". **That premise was
+/// false.** Returning `YES` from the delegate is precisely the contract for
+/// answering later; the request may be finished at any point afterwards. The
+/// mistaken reading is what put a 30s budget, three attempts and their backoff
+/// on a `DISPATCH_QUEUE_SERIAL` shared by every resource-loading request the
+/// asset makes. See the delegate method for the full account.
 - (NSData *)contentKeyForSPC:(NSData *)spc assetId:(NSString *)assetId {
     BOOL usesEzDrm = FastPixUsesEzDrmFormat(_licenseURL);
 
@@ -217,13 +267,88 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
         : (assetId.length ? assetId : (endpoint.host ?: @"?"));
     FastPixCountLicenceRequest(countedId);
 
+    CFAbsoluteTime startedAt = CFAbsoluteTimeGetCurrent();
+    CFAbsoluteTime deadline = startedAt + kFastPixLicenceTotalBudget;
+
+    NSData *contentKey = nil;
+    NSInteger lastStatus = 0;
+    NSUInteger attempt = 0;
+
+    while (attempt < kFastPixLicenceMaxAttempts) {
+        NSTimeInterval remaining = deadline - CFAbsoluteTimeGetCurrent();
+        if (remaining <= 0) {
+            FastPixDrmLog(@"licence budget of %.0fs exhausted after %lu attempt(s).",
+                          kFastPixLicenceTotalBudget, (unsigned long)attempt);
+            break;
+        }
+
+        attempt += 1;
+        BOOL transportFailed = NO;
+        NSInteger status = 0;
+        CFAbsoluteTime attemptStartedAt = CFAbsoluteTimeGetCurrent();
+        contentKey = [self postSPC:spc
+                                to:endpoint
+                           timeout:MIN(remaining, kFastPixLicenceAttemptTimeout)
+                            status:&status
+                   transportFailed:&transportFailed];
+        lastStatus = status;
+
+        FastPixDrmLog(@"licence attempt %lu/%lu: %@ in %.0fms",
+                      (unsigned long)attempt,
+                      (unsigned long)kFastPixLicenceMaxAttempts,
+                      contentKey.length ? @"OK"
+                          : (transportFailed ? @"transport failure"
+                                             : [NSString stringWithFormat:@"HTTP %ld",
+                                                (long)status]),
+                      (CFAbsoluteTimeGetCurrent() - attemptStartedAt) * 1000.0);
+
+        if (contentKey.length > 0) break;
+        if (!FastPixLicenceIsRetryable(status, transportFailed)) {
+            // A refusal, not a wobble. Answering now is kinder than spending
+            // the budget to be refused twice more.
+            break;
+        }
+        if (attempt >= kFastPixLicenceMaxAttempts) break;
+
+        NSTimeInterval backoff = kFastPixLicenceBackoff[attempt - 1];
+        if (CFAbsoluteTimeGetCurrent() + backoff >= deadline) break;
+        [NSThread sleepForTimeInterval:backoff];
+    }
+
+    double elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1000.0;
+    if (contentKey.length > 0 && attempt > 1) {
+        // Worth its own line: a licence that needed retries is the difference
+        // between a four-second start and a fifty-second one, and nothing else
+        // in the system records it.
+        FastPixDrmLog(@"licence recovered after %lu attempts in %.0fms.",
+                      (unsigned long)attempt, elapsedMs);
+    }
+    [self reportAcquisition:countedId
+                         ok:contentKey.length > 0
+                     status:lastStatus
+                   attempts:attempt
+                  elapsedMs:elapsedMs
+                      bytes:contentKey.length];
+    return contentKey;
+}
+
+/// One attempt. Answers the CKC, or nil with [statusOut] and [transportOut]
+/// describing why not.
+- (NSData *)postSPC:(NSData *)spc
+                 to:(NSURL *)endpoint
+            timeout:(NSTimeInterval)timeout
+             status:(NSInteger *)statusOut
+    transportFailed:(BOOL *)transportOut {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:endpoint];
     request.HTTPMethod = @"POST";
     [request setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
     request.HTTPBody = spc;
+    request.timeoutInterval = timeout;
 
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     __block NSData *contentKey = nil;
+    __block NSInteger status = 0;
+    __block BOOL transportFailed = NO;
 
     NSURLSessionDataTask *task =
         [NSURLSession.sharedSession dataTaskWithRequest:request
@@ -231,15 +356,16 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
                                                           NSURLResponse *response,
                                                           NSError *error) {
         if (error != nil) {
+            transportFailed = YES;
             FastPixDrmLog(@"licence request failed for %@: %@",
                           FastPixRedact(endpoint), error.localizedDescription);
         } else {
-            NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class]
+            status = [response isKindOfClass:NSHTTPURLResponse.class]
                 ? ((NSHTTPURLResponse *)response).statusCode : -1;
             // A licence server reports rejection with an HTTP status, not a
             // transport error. Without this check an error body — JSON, HTML —
             // is handed to AVFoundation as though it were a content key, and
-            // surfaces as an unexplained decode failure far from the cause.
+            // surfaces as an unexplained decode error far from the cause.
             if (status < 200 || status > 299) {
                 NSString *body = data.length
                     ? [[NSString alloc] initWithData:[data subdataWithRange:
@@ -258,13 +384,44 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
 
     // Bounded, so a hung licence server cannot wedge the loader queue.
     if (dispatch_semaphore_wait(done,
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC))) != 0) {
+            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC))) != 0) {
         [task cancel];
-        FastPixDrmLog(@"licence request timed out after 30s for %@.",
-                      FastPixRedact(endpoint));
-        return nil;
+        FastPixDrmLog(@"licence request timed out after %.0fs for %@.",
+                      timeout, FastPixRedact(endpoint));
+        transportFailed = YES;
+        contentKey = nil;
     }
+
+    if (statusOut != NULL) *statusOut = status;
+    if (transportOut != NULL) *transportOut = transportFailed;
     return contentKey;
+}
+
+/// Hand the outcome to whoever is listening, so a licence acquisition is
+/// visible where the developer already looks.
+///
+/// Dart counts what this SDK *intends* — an arming, a configuration, a reuse —
+/// and cannot see what the network actually did, because the request is made
+/// here. `FastPixDrmLog` says as much in its own doc comment. This closes that
+/// gap: the count in `flutter run` becomes the count of licences really
+/// fetched, with the time they took.
+- (void)reportAcquisition:(NSString *)playbackId
+                       ok:(BOOL)ok
+                   status:(NSInteger)status
+                 attempts:(NSUInteger)attempts
+                elapsedMs:(double)elapsedMs
+                    bytes:(NSUInteger)bytes {
+    void (^callback)(NSDictionary<NSString *, id> *) =
+        FastPixFairPlayPatch.acquisitionCallback;
+    if (callback == nil) return;
+    callback(@{
+        @"playbackId": playbackId ?: @"",
+        @"ok": @(ok),
+        @"statusCode": @(status),
+        @"attempts": @(attempts),
+        @"elapsedMs": @(elapsedMs),
+        @"bytes": @(bytes),
+    });
 }
 
 - (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader
@@ -276,6 +433,57 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
     if (assetURI == nil || ![assetURI.scheme isEqualToString:@"skd"]) {
         return NO;
     }
+
+    // Answered on a queue of our own, and `YES` returned immediately.
+    //
+    // Returning `YES` is the delegate contract for "I will answer this
+    // later" — it does not mean the answer must already be in hand — and the
+    // queue this is called on is the engine's, created
+    // `DISPATCH_QUEUE_SERIAL` (`BetterPlayer.m:221`). Fetching the certificate and the licence inline,
+    // as this used to, therefore blocked *every* later resource-loading
+    // request behind it: a certificate fetch, a licence POST, up to three
+    // attempts and their backoff, a 30s budget.
+    //
+    // Playback survives that, because AVFoundation simply waits — a title
+    // whose licence server threw two 500s was measured at 22062ms to first
+    // frame, slow but playing — but nothing else the asset loads can proceed
+    // in the meantime.
+    //
+    // The FastPix native iOS SDK answers the same `skd://` requests through
+    // the same delegate API and does it asynchronously — `FastPixDRMDelegate`
+    // in `FastPixAvPlayerItem.swift` returns `true` and finishes the request
+    // from a `Task`, holding no lock at all. This does the same.
+    dispatch_async([FastPixFairPlayLoader licenceQueue], ^{
+        [self fulfilKeyRequest:loadingRequest assetURI:assetURI];
+    });
+    return YES;
+}
+
+/// The queue every licence exchange runs on.
+///
+/// Concurrent, so two protected sources — a playing one and a preload warming
+/// its neighbour — do not serialise behind each other. Never the engine's
+/// loader queue, which is the bug above.
++ (dispatch_queue_t)licenceQueue {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.fastpix.fairplay.licence",
+                                      DISPATCH_QUEUE_CONCURRENT);
+    });
+    return queue;
+}
+
+/// Fetch the certificate and the licence, then answer [loadingRequest].
+///
+/// Runs off the engine's loader queue. Every `return` here leaves the request
+/// already answered — finished with data or with an error — because a request
+/// that is neither is one AVFoundation waits on forever.
+- (void)fulfilKeyRequest:(AVAssetResourceLoadingRequest *)loadingRequest
+                assetURI:(NSURL *)assetURI {
+    // The viewer moved on — a source change, a seek past the segment, a
+    // disposed player. Answering a cancelled request is at best wasted work.
+    if (loadingRequest.isCancelled) return;
 
     NSString *uriString = assetURI.absoluteString;
     BOOL usesEzDrm = FastPixUsesEzDrmFormat(_licenseURL);
@@ -299,7 +507,7 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
             [NSError errorWithDomain:NSURLErrorDomain
                                 code:NSURLErrorClientCertificateRejected
                             userInfo:nil]];
-        return YES;
+        return;
     }
 
     // EZDRM keys the licence on the whole `skd://` URI. Other servers, FastPix
@@ -310,7 +518,7 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
     if (contentIdData == nil) {
         FastPixDrmLog(@"content id could not be encoded.");
         [loadingRequest finishLoadingWithError:nil];
-        return YES;
+        return;
     }
 
     // Both identifiers, because they are what a cross-wired configuration
@@ -329,7 +537,7 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
     if (spc == nil) {
         FastPixDrmLog(@"SPC generation failed: %@", spcError.localizedDescription);
         [loadingRequest finishLoadingWithError:spcError];
-        return YES;
+        return;
     }
 
     NSData *contentKey = [self contentKeyForSPC:spc assetId:assetId];
@@ -338,13 +546,37 @@ static NSString *const kEzDrmDefaultLicenseServer = @"https://fps.ezdrm.com/api/
             [NSError errorWithDomain:NSURLErrorDomain
                                 code:NSURLErrorBadServerResponse
                             userInfo:nil]];
-        return YES;
+        return;
     }
 
     FastPixDrmLog(@"licence OK, %lu bytes.", (unsigned long)contentKey.length);
+
+    // Declare what the response *is* before handing it over.
+    //
+    // Playback tolerates the omission — AVFoundation infers a streaming key
+    // from the `skd://` scheme — but `AVStreamingKeyDeliveryContentKeyType` is
+    // the value Apple's own FPS sample sets here, so it is declared rather
+    // than left to inference.
+    loadingRequest.contentInformationRequest.contentType =
+        AVStreamingKeyDeliveryContentKeyType;
+    // Re-checked rather than assumed: the licence exchange above can take
+    // seconds, and a source change or a disposed player in that window
+    // cancels the request. Responding to a cancelled one throws.
+    if (loadingRequest.isCancelled) return;
     [loadingRequest.dataRequest respondWithData:contentKey];
     [loadingRequest finishLoading];
-    return YES;
+}
+
+/// The player abandoned a request we are still working on.
+///
+/// Nothing to unwind — the exchange checks [AVAssetResourceLoadingRequest
+/// isCancelled] before it answers — but a cancelled key request and a hung one
+/// look identical in a device log otherwise, and that distinction is most of
+/// what makes a DRM start diagnosable.
+- (void)resourceLoader:(AVAssetResourceLoader *)resourceLoader
+    didCancelLoadingRequest:(AVAssetResourceLoadingRequest *)loadingRequest {
+    if (![loadingRequest.request.URL.scheme isEqualToString:@"skd"]) return;
+    FastPixDrmLog(@"key request cancelled by the player before it was answered.");
 }
 
 - (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader
@@ -372,6 +604,9 @@ static const void *kFastPixRetainedLoaderKey = &kFastPixRetainedLoaderKey;
 static const void *kFastPixLoaderAssetURLKey = &kFastPixLoaderAssetURLKey;
 
 static BOOL _fpFairPlayInstalled = NO;
+
+/// The host's acquisition listener, or nil when nobody is watching.
+static void (^_fpAcquisitionCallback)(NSDictionary<NSString *, id> *) = nil;
 
 /// The most recently supplied pair, used when an asset cannot be matched to a
 /// registered one. This is the whole of what the patch held before per-video
@@ -401,6 +636,14 @@ static NSString *FastPixPlaybackIdFromURL(NSURL *url) {
 
 + (BOOL)isInstalled {
     return _fpFairPlayInstalled;
+}
+
++ (void (^)(NSDictionary<NSString *, id> *))acquisitionCallback {
+    return _fpAcquisitionCallback;
+}
+
++ (void)setAcquisitionCallback:(void (^)(NSDictionary<NSString *, id> *))callback {
+    _fpAcquisitionCallback = [callback copy];
 }
 
 + (void)registerCertificateUrl:(NSString *)certificateUrl

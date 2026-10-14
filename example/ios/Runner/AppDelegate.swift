@@ -48,7 +48,10 @@ import UIKit
   /// exactly as they are today, and nothing here runs for them.
   private static var snapshotCover: UIView?
 
-  private static var isFullscreenLocked: Bool { orientationMask == .landscape }
+  /// Whether a screen is presenting fullscreen. Held separately rather than
+  /// read off the mask, because a vertical video's fullscreen locks to
+  /// portrait, which is not distinguishable from an ordinary portrait mask.
+  private static var isFullscreenLocked = false
 
   private static func addSnapshotCover(to scene: UIWindowScene) {
     guard isFullscreenLocked, snapshotCover == nil,
@@ -75,9 +78,9 @@ import UIKit
     // Diagnostic: this is the question iOS asks as it presents the app, and
     // the answer decides whether it comes back landscape or rotates later.
     // If this never logs around a PiP return, the mask is not the mechanism.
-    NSLog("[FastPixOrientation] iOS asked; answering mask=%lu (landscape=%@)",
+    NSLog("[FastPixOrientation] iOS asked; answering mask=%lu (fullscreen=%@)",
           AppDelegate.orientationMask.rawValue,
-          AppDelegate.orientationMask == .landscape ? "YES" : "NO")
+          AppDelegate.isFullscreenLocked ? "YES" : "NO")
     return AppDelegate.orientationMask
   }
 
@@ -125,9 +128,14 @@ import UIKit
         result(FlutterMethodNotImplemented)
         return
       }
-      let fullscreen =
-        (call.arguments as? [String: Any])?["fullscreen"] as? Bool ?? false
-      AppDelegate.orientationMask = fullscreen ? .landscape : .allButUpsideDown
+      let arguments = call.arguments as? [String: Any]
+      let fullscreen = arguments?["fullscreen"] as? Bool ?? false
+      // A vertical video's fullscreen stays portrait, as YouTube's does; only
+      // a landscape one rotates.
+      let portrait = arguments?["portrait"] as? Bool ?? false
+      AppDelegate.isFullscreenLocked = fullscreen
+      let fullscreenMask: UIInterfaceOrientationMask = portrait ? .portrait : .landscape
+      AppDelegate.orientationMask = fullscreen ? fullscreenMask : .allButUpsideDown
 
       // Ask iOS to re-evaluate now rather than at the next natural opportunity,
       // so a change made while the app is on screen takes effect immediately.

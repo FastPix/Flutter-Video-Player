@@ -64,6 +64,30 @@ void main() {
       await controller.dispose();
     });
 
+    test('a bound seekbar is told at once that the old state is gone',
+        () async {
+      // Until the new source's first tick a seekbar kept the previous
+      // duration and stayed draggable; a drag begun then lost its release
+      // when the bar disabled itself, and the scrub never ended.
+      final controller = FastPixPlayerController();
+      await PlayerTestHarness.load(controller, PlayerTestHarness.source('a'));
+      controller.beginScrub(const Duration(seconds: 30));
+
+      final seen = <FastPixPlaybackState>[];
+      final sub = controller.playbackStateStream.listen(seen.add);
+      final load = controller.loadPlaybackId(PlayerTestHarness.source('b'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(seen, isNotEmpty, reason: 'nothing published at the switch');
+      expect(seen.first.position, Duration.zero,
+          reason: 'the abandoned scrub target is still reported');
+      expect(seen.first.duration, Duration.zero);
+
+      await load;
+      await sub.cancel();
+      await controller.dispose();
+    });
+
     test('a failure on the previous source is not reported for the new one',
         () async {
       final controller = FastPixPlayerController();

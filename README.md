@@ -41,6 +41,10 @@ This SDK simplifies HLS video playback by offering a wide range of customization
     - The SDK warms the items either side of the active one automatically, so an advance starts from a warm player rather than a cold manifest fetch.
     - An item can declare intro, recap, song and credits ranges, and the player offers a skip once playback is inside one — see [Playlists](#playlists).
 
+- **Prerendering**
+    - The next playlist item waits paused and muted on a hidden surface beneath the active video, with its first frame already drawn, so Next and autoplay-next cut straight to video instead of a black frame.
+    - On by default, with a switch for cellular; best effort, and it never surfaces as a playback error — see [Prerendering](#prerendering).
+
 - **Custom UI**
     - `FastPixVideoSurface` renders video and nothing else, so an app can stack its own transport over it and never use the bundled skin.
     - The controller exposes the whole functionality API behind those controls: a playback state stream, scrubbing, playback rate, quality levels, audio tracks and subtitle tracks — see [Building a custom UI](#building-a-custom-ui).
@@ -48,6 +52,10 @@ This SDK simplifies HLS video playback by offering a wide range of customization
 - **Picture-in-Picture**
     - `controller.pip` enters, exits and toggles a PiP window on Android and iOS, and can open one automatically when the app goes to the background.
     - The window's content is yours to build with `pipBuilder`, or left to the bundled layout — see [Picture-in-Picture](#picture-in-picture).
+
+- **Seek preview**
+    - The player loads the active source's FastPix spritesheet in the background and hands a custom seek bar a thumbnail for any position, with `FastPixSeekPreview` or `controller.spritesheetTileAt(position)`.
+    - On by default for on-demand sources; opt into an advanced spritesheet for a thumbnail every 1 to 10 seconds — see [Seek preview](#seek-preview-spritesheets).
 
 - **Advanced stream control**
     - The player supports `onDemand` and `live` stream capabilities by utilizing specified `streamType`, enabling a versatile playback experience based on content type.
@@ -65,12 +73,10 @@ To get started with the FastPix Player SDK we need some prerequisites, follow th
 
 
 # Installation:
-To get started with the SDK, first install the FastPix Player SDK. You can use the `flutter pub add fastpix_video_player` command to add it directly:
-Or
-Add the dependency in your `pubspec.yaml`:
+To get started with the SDK, first install the FastPix Player SDK. Run `flutter pub add fastpix_video_player`, or add the dependency to your `pubspec.yaml`:
 ```yaml
 dependencies:
-  fastpix_video_player: 1.1.2
+  fastpix_video_player: 1.2.0
 ```
 
 ### Basic Usage Example
@@ -194,8 +200,23 @@ FastPixPlayer(
 )
 ```
 
-The widget sizes itself from the video's own aspect ratio; there is no aspect
-ratio parameter to set.
+#### Aspect Ratio
+
+The player is 16:9 by default.
+
+```dart
+FastPixPlayer(controller: controller, aspectRatio: 9 / 16)          // fixed shape
+FastPixPlayer(controller: controller, matchVideoAspectRatio: true)  // video's shape
+```
+
+`matchVideoAspectRatio` uses `aspectRatio` (or 16:9) until the video's size is
+known. `FastPixVideoSurface` takes both parameters.
+
+To control how a video fits a player of a different shape, set
+`FastPixPlayerConfiguration.videoFit`:
+
+- `FastPixVideoFit.contain` (default): shows the whole video, with bars.
+- `FastPixVideoFit.cover`: fills the player and crops the overflow.
 
 #### Player Widget With A Cast Button
 
@@ -252,13 +273,13 @@ source.
 ### Public Media
 
 ```dart
-final liveDataSource = FastPixPlayerDataSource.hls(
-  playbackId: 'live-stream-id',
-  streamType: StreamType.onDemand, // By Default StreamType is on-demand
-  cacheEnabled: false // Disable cache for streaming
+final dataSource = FastPixPlayerDataSource.hls(
+  playbackId: 'your-playback-id',
+  streamType: StreamType.onDemand, // The default; use StreamType.live for live streams
+  cacheEnabled: false // Disable the playback cache
 );
 
-final liveConfiguration = FastPixPlayerConfiguration(
+final configuration = FastPixPlayerConfiguration(
   'your-workspace-id',
   'your-viewer-id',
   'your-beacon-url',
@@ -272,13 +293,13 @@ final liveConfiguration = FastPixPlayerConfiguration(
 For private media, token is required. See [Generate JWTs for secure media](https://fastpix.com/docs/video-security/generate-jwts-for-secure-media) for how to create a signing key and generate the playback token, and [Secure video playback](https://fastpix.com/docs/web-player/secure-video-playback) for how the token is passed and validated.
 
 ```dart
-final liveDataSource = FastPixPlayerDataSource.hls(
-  playbackId: 'live-stream-id',
-  streamType: StreamType.onDemand, // By Default StreamType is on-demand
+final dataSource = FastPixPlayerDataSource.hls(
+  playbackId: 'your-playback-id',
+  streamType: StreamType.onDemand, // The default; use StreamType.live for live streams
   token: 'jwt-token' // Token is required for private media
 );
 
-final liveConfiguration = FastPixPlayerConfiguration(
+final configuration = FastPixPlayerConfiguration(
   'your-workspace-id',
   'your-viewer-id',
   'your-beacon-url',
@@ -537,7 +558,7 @@ Add the discovery permissions and the Cast framework configuration to `android/a
 </application>
 ```
 
-The runtime `NEARBY_WIFI_DEVICES` request is made by the SDK itself from `startDiscovery()`; the manifest entry is all your app has to add. Casting also needs Google Play Services — when it is missing or too old the failure arrives as `FP_CAST_PLAY_SERVICES_UNAVAILABLE`.
+The runtime `NEARBY_WIFI_DEVICES` request is made by the SDK itself from `startDiscovery()`, once per app process — later discoveries only check the status, so a viewer who declined is not prompted again on every screen. The manifest entry is all your app has to add. Casting also needs Google Play Services — when it is missing or too old the failure arrives as `FP_CAST_PLAY_SERVICES_UNAVAILABLE`.
 
 #### iOS
 
@@ -890,7 +911,106 @@ control bar; `showPlaylistPanel` and `showPlaylistControls` on
 `FastPixPlayerControlsConfiguration` turn the panel and the previous and next arrows
 off.
 
-## Skip segments 
+## Prerendering
+
+Preloading makes the next item *start* faster; prerendering makes it *appear*
+at once. Once the active item shows its first frame, the SDK builds the next
+item's player, positions it at its start and holds it paused and muted on a
+hidden surface beneath the active video until its first frame is drawn. Next,
+autoplay-next or a `jumpTo` that lands on it then swaps to that frame, with no
+black frame between items.
+
+It is **on by default** and needs no code. Turn it off, or keep it off cellular:
+
+```dart
+FastPixPlayerConfiguration(
+  workspaceId,
+  viewerId,
+  beaconUrl,
+  prerenderConfiguration: const FastPixPlayerPrerenderConfiguration(
+    enablePrerender: true,       // default true; false restores the old transitions
+    prerenderOnCellular: false,  // default true; a prerender spends data on a video the viewer may never reach
+  ),
+);
+
+// At runtime, without reloading anything:
+controller.updatePrerenderConfiguration(
+  const FastPixPlayerPrerenderConfiguration(prerenderOnCellular: false),
+);
+```
+
+`updatePrerenderConfiguration` applies at once: a prerender the new settings
+rule out is released, and one they now allow is made. A later `setPlaylist` or
+`initialize` with its own configuration replaces it. Prerender settings never
+reach the engine, so they are not part of the [preload](#preloading-and-precaching)
+adoption fingerprint and changing them leaves the active and warm players alone.
+
+**What is prerendered.** Always the next item — the first item again after the
+last with repeat `all`; nothing past the end with repeat `off`, and nothing with
+repeat `one`. One prerender at a time per controller. Moving anywhere else
+releases it, and an item that is already a warm preloaded player is reused
+rather than built again.
+
+**Prerendering outside a playlist.** Ask for a source yourself, then load it:
+
+```dart
+final result = await controller.prerender(nextSource);  // FastPixPrerenderResult
+controller.prerenderStatusOf(nextSource.playbackId);    // idle | preparing | frameReady | skipped | failed | released
+controller.cancelPrerender(nextSource.playbackId);
+await controller.loadPlaybackId(nextSource);            // promotes it when ready
+```
+
+`prerender` never throws. A refusal completes with status `skipped` and an
+`errorCode` saying why.
+
+**When it is skipped.** Each skip is reported with a `FastPixPrerenderErrorCode`
+and the transition falls back to the normal path — a warm player when one exists,
+otherwise a cold start:
+
+| Case | Code |
+| --- | --- |
+| Prerendering off | `disabled` |
+| On cellular with `prerenderOnCellular: false` | `networkPolicy` |
+| The slot is taken, or a build is still in flight | `decoderBudget` |
+| DRM-protected source | `drm` |
+| Live source, or the active item is live | `live` |
+| Picture-in-Picture active | `pip` |
+| A Cast session | `externalPlayback` |
+| App not in the foreground | `background` |
+| No next item, or repeat `one` | `navigationPolicy` |
+| No `FastPixPlayer` / `FastPixVideoSurface` mounted, or fullscreen | `noSurface` |
+| Native first-frame hook unavailable on this build | `featureDisabled` |
+
+A prerender that started and could not finish fails with `loadFailed`,
+`timedOut` (no first frame within `FastPixPreloadManager.warmTimeout`),
+`seekFailed` or `surfaceUnavailable`. A prerender already held is released when
+a policy above starts to apply — PiP opening, a Cast session starting, the
+app leaving the foreground, memory pressure — and made again once
+it no longer does.
+
+The hidden player is kept out of Picture-in-Picture and Now Playing;
+only the active item is ever seen or heard there.
+
+**Events.** `prerenderRequested` (`FastPixPrerenderRequestedEvent`, with
+`automatic` true when the playlist asked for it), `prerenderReady`
+(`FastPixPrerenderReadyEvent`, with `timeToFirstFrame`) and `prerenderFailed`
+(`FastPixPrerenderFailedEvent`, with `code` and `message`, for skips and
+failures alike — `prerenderStatusOf` tells them apart). Each names the
+prerendered source's `playbackId` and `playlistIndex`, not the active item's,
+and none of them is a playback error.
+
+```dart
+controller.addEventListener(FastPixPlayerEventTypes.prerenderReady, (event) {
+  final ready = event as FastPixPrerenderReadyEvent;
+  debugPrint('${ready.playbackId} ready in ${ready.timeToFirstFrame.inMilliseconds} ms');
+});
+```
+
+Decisions are logged under the `preloading` tag (see
+[Watching what happened](#watching-what-happened)); grep for `PRERENDER`, and
+for `PRERENDER promoted` to confirm a transition used it.
+
+## Skip segments
 
 An item can declare the ranges a viewer usually skips. The player reports when
 playback enters one and offers `skipCurrentSegment()` to jump to its end.
@@ -923,15 +1043,17 @@ controller.addEventListener(FastPixPlayerEventTypes.skipHidden, (_) => hideSkipB
 await controller.skipCurrentSegment(); // false when nothing is active
 ```
 
-The SDK holds segments until the item's duration is known, then validates then once at that
-point, because two of the four rules — a start at or beyond the duration, an end
-beyond it — need a duration that does not exist when the playlist is supplied.
-The SDK rejects an invalid segments on its own with a `skipFailed` event that names the reason, and
-its valid siblings keep working. On a live source, where the duration
-never settles, segments stay pending: the SDK offers no skip and reports no failure.
+The SDK holds segments until the item's duration is known, then validates them
+once at that point, because two of the four rules — a start at or beyond the
+duration, an end beyond it — need a duration that does not exist when the
+playlist is supplied. The SDK rejects an invalid segment on its own with a
+`skipFailed` event that names the reason, and its valid siblings keep working.
+On a live source, where the duration never settles, segments stay pending: the
+SDK offers no skip and reports no failure.
 
-`enableSkips` on `FastPixPlayerControlsConfiguration` draws the skip button in
-the bundled skin. A custom UI listens for the events instead.
+The bundled skin draws no skip-segment button, so the app draws its own from
+the events above. `enableSkips` on `FastPixPlayerControlsConfiguration` is
+unrelated: it turns on the skin's ±10 second seek buttons.
 
 ## Picture-in-Picture
 
@@ -955,8 +1077,8 @@ controller.addEventListener(FastPixPlayerEventTypes.pipChanged, (event) {
 
 PiP survives a playlist advance, and captions scale to the window rather than
 rendering at full-player size inside it. Supply the window's content with
-`pipBuilder` on `FastPixPlayer` or `FastPixVideoSurface`; the SDK uses the
-bundled `fastPixDefaultPipLayout`.
+`pipBuilder` on `FastPixPlayer` or `FastPixVideoSurface`; without one the SDK
+uses the bundled `fastPixDefaultPipLayout`.
 
 ### Picture-in-Picture platform setup
 
@@ -1021,6 +1143,7 @@ StreamBuilder<FastPixPlaybackState>(
 controller.beginScrub();
 controller.updateScrub(position);
 await controller.endScrub(position);
+controller.cancelScrub();                         // drag abandoned: no seek
 
 // Tracks and quality
 controller.getQualityLevels();
@@ -1037,6 +1160,12 @@ controller.toggleFullscreen();
 await controller.toggleCast();
 ```
 
+Call `cancelScrub()` when the seek bar goes away mid-drag — entering fullscreen
+or PiP rebuilds the controls, and Flutter disposes the old slider without
+calling its end callback, so `endScrub` never arrives. Without it the scrub
+target stands in for the playhead until the next drag. It seeks nowhere and
+emits no `scrubEnded`, and returns whether a scrub was in progress.
+
 Quality selection is a ceiling rather than an exact selection on both platforms: the
 player still adapts below the level you set.
 
@@ -1052,24 +1181,153 @@ channel the app already listens to, carrying a `FastPixCustomUIErrorCode`:
 `playbackRateUnsupported`, `castUnavailable`, `playerNotReady`, `pipUnsupported`,
 or `pipFailed`.
 
+### When playback fails
+
+A source that cannot play produces no picture, so `FastPixVideoSurface` draws a
+failure panel in its place — an icon, the failure's headline and its code.
+Without it the surface would answer a permanent failure with the same blank box
+it uses for "still loading", and neither the viewer nor you could tell the two
+apart.
+
+Replace it with `errorBuilder`, or return a `SizedBox.shrink()` from one to draw
+nothing and render your own from the `error` event:
+
+```dart
+FastPixVideoSurface(
+  controller: controller,
+  errorBuilder: (context, error) => MyFailurePanel(
+    message: error.message,
+    code: error.code,
+    isDrm: error is FastPixPlayerDrmErrorEvent,
+  ),
+)
+```
+
+Only failures that actually stopped playback are drawn. The
+`FastPixCustomUIErrorCode` failures above share the same `error` channel but
+never reach the panel, because playback did not stop — a cast route that could
+not be offered must not replace a playing video. The test for it is
+`controller.lastError`, which those failures deliberately do not set.
+
+The platform players report every load failure as the same opaque string —
+`Source error` — so the panel also runs the same diagnosis probe the default
+skin does, and for the same reason: without it the only honest headline is
+"Playback failed", which is what the viewer could already see. The probe
+re-requests the manifest and, for a protected source, the licence and
+certificate endpoints, separating a bad playback ID (manifest 404) from an
+expired playback token (403) from a rejected licence (401/403). The detail line
+shows "Working out why…" while it runs, then the answer; the headline never
+changes, because a message that rewrites itself reads as the first one having
+been wrong.
+
+Turn it off with `diagnoseErrors: false` to make no network request on a
+failure — `controller.diagnosePlayback()` is then yours to call.
+
+## Seek preview (spritesheets)
+
+FastPix generates spritesheets — grids of thumbnails — for every on-demand
+video. The player loads the active source's spritesheet in the background and
+gives a custom seek bar a thumbnail for any position.
+
+**Normal spritesheet.** On by default, with nothing to configure. FastPix picks
+50 or 100 tiles and their spacing from the video's length.
+
+**Advanced spritesheet.** Opt in for a thumbnail every 1 to 10 seconds. When it
+is on, only the advanced spritesheet is loaded — the normal one is not used
+first or as a fallback. An interval outside 1 to 10 uses 10.
+
+```dart
+final configuration = FastPixPlayerConfiguration(
+  'your-workspace-id',
+  'your-viewer-id',
+  'your-beacon-url',
+  spritesheetConfiguration: const FastPixPlayerSpritesheetConfiguration(
+    enableAdvancedSpritesheet: true,
+    advancedSpritesheetInterval: 2,
+  ),
+);
+```
+
+Show the preview above your seek bar's thumb while the viewer drags, passing
+the scrub position:
+
+```dart
+if (controller.isScrubbing)
+  FastPixSeekPreview(
+    controller: controller,
+    position: state.position, // from playbackStateStream while scrubbing
+    width: 160,
+  ),
+```
+
+`FastPixSeekPreview` draws the tile for the position. While no image is
+available — spritesheets disabled, a live source, still loading or generating,
+or a failure — it shows only the time. It never shows a spinner or an error.
+The example app's `FastPixSeekBar` shows the full pattern.
+
+To draw thumbnails yourself, `controller.spritesheetTileAt(position)` returns
+the tile covering a position, with its `start`, `end` and `region` in the
+spritesheet image. `controller.spritesheet`, `spritesheetStream` and
+`spritesheetStatus` (`idle`, `loading`, `ready`, `failed`) follow the active
+source.
+
+**Hosts.** The images host is derived from the source's `customDomain`, by
+replacing `stream` with `images` in the first label. Nothing to configure, and
+a playlist that mixes environments works per item:
+
+```dart
+FastPixPlayerDataSource.hls(
+  playbackId: 'staging-playback-id',
+  customDomain: 'stream.fastpix.co', // spritesheets: images.fastpix.co
+);
+```
+
+A source with no `customDomain` uses `images.fastpix.com`. A `customDomain`
+that is not a `stream.*` host has no images host to derive, so that source
+shows a time-only preview rather than having a host guessed for it; read the
+resolved origin from `FastPixPlayerDataSource.imagesHost`, which is `null` in
+that case.
+
+**Private and DRM media.** The source's playback `token` is sent with the
+spritesheet requests; without one they fail with `unauthorized`.
+
+**Things to know**
+
+- Spritesheets load after the source is ready and never delay or affect
+  playback. Turn them off with `enableSpritesheet: false`.
+- Each source costs a metadata request (5–85 KB) and an image: about 0.3 MB for
+  a normal spritesheet, up to about 19 MB for an advanced one at interval 2 on
+  a long video.
+- The first request for a new advanced interval makes FastPix generate it.
+  That took about two minutes for an 80-minute video, while the player retries
+  for about 30 seconds (after 1, 2, 4, 8 and 15 s) — so the first viewer of a
+  new interval usually sees only the time, and later viewers see thumbnails.
+- Images too large to decode at full size on a phone are decoded at a reduced
+  size; tiles look softer but stay correct.
+- Failures arrive as `FastPixSpritesheetFailedEvent`, never on the playback
+  error channel, with a `FastPixSpritesheetErrorCode`: `unauthorized`,
+  `mediaNotFound`, `intervalExceedsDurationCap`, `generationTimedOut`,
+  `invalidResponse`, `metadataImageMismatch`, `decodeFailed` or
+  `networkError`. The other spritesheet events are `spritesheetLoadStarted`,
+  `spritesheetLoaded` and `spritesheetImageReady`.
+
 ## Custom Domain
 
 ### Public Media
 
 ```dart
-final liveDataSource = FastPixPlayerDataSource.hls(
-  playbackId: 'live-stream-id',
-  streamType: StreamType.onDemand, // By Default StreamType is on-demand
-  customDomain: 'your custom domain goes here' // Ex: xyz.com
+final dataSource = FastPixPlayerDataSource.hls(
+  playbackId: 'your-playback-id',
+  streamType: StreamType.onDemand, // The default; use StreamType.live for live streams
+  customDomain: 'your custom domain goes here' // Ex: stream.fastpix.co
 );
 
-final liveConfiguration = FastPixPlayerConfiguration(
+final configuration = FastPixPlayerConfiguration(
   'your-workspace-id',
   'your-viewer-id',
   'your-beacon-url',
   controlsConfiguration: const FastPixPlayerControlsConfiguration(
     autoPlay: true,
-    showTimeIndicator: false, // Hide the time indicator for live streams
   ),
 );
 ```
@@ -1078,20 +1336,19 @@ final liveConfiguration = FastPixPlayerConfiguration(
 For private media, token is required.
 
 ```dart
-final liveDataSource = FastPixPlayerDataSource.hls(
-  playbackId: 'live-stream-id',
-  streamType: StreamType.onDemand, // By Default StreamType is on-demand
+final dataSource = FastPixPlayerDataSource.hls(
+  playbackId: 'your-playback-id',
+  streamType: StreamType.onDemand, // The default; use StreamType.live for live streams
   token: 'jwt-token', // Token is required for private media
-  customDomain: 'your custom domain goes here' // Ex: xyz.com
+  customDomain: 'your custom domain goes here' // Ex: stream.fastpix.co
 );
 
-final liveConfiguration = FastPixPlayerConfiguration(
+final configuration = FastPixPlayerConfiguration(
   'your-workspace-id',
   'your-viewer-id',
   'your-beacon-url',
   controlsConfiguration: const FastPixPlayerControlsConfiguration(
     autoPlay: true,
-    showTimeIndicator: false, // Hide the time indicator for live streams
   ),
 );
 ```
@@ -1110,8 +1367,14 @@ The main controller class that manages the player state and configuration:
 - `seekForward([offset])` / `seekBackward([offset])`: Jump by `offset`, 10 seconds by default, clamped to the source
 - `setPlaybackRate(rate)`, `playbackRate`, `supportedPlaybackRates`
 - `playbackState` / `playbackStateStream`: A `FastPixPlaybackState` snapshot — position, duration, buffered position, playing, buffering, rate
-- `beginScrub([position])`, `updateScrub(position)`, `endScrub(position)`, `isScrubbing`
+- `beginScrub([position])`, `updateScrub(position)`, `endScrub(position)`, `cancelScrub()`, `isScrubbing`
 - `enterFullscreen()`, `exitFullscreen()`, `toggleFullscreen()`, `isFullscreen`
+
+#### Seek preview
+- `spritesheet`: The active source's `FastPixSpritesheet`, or `null`
+- `spritesheetStream`: Emits when metadata loads, again when the image is ready, and `null` on a source change
+- `spritesheetStatus`: `idle`, `loading`, `ready` or `failed` — see [Seek preview](#seek-preview-spritesheets)
+- `spritesheetTileAt(position)`: The `FastPixSpritesheetTile` covering a position, or `null`
 
 #### Tracks and quality
 - `getQualityLevels()`, `getCurrentQualityLevel()`, `setQualityLevel(level)`, `setQualityAuto()`, `isQualityAuto`
@@ -1129,6 +1392,11 @@ The main controller class that manages the player state and configuration:
 - `autoPlayNext`: Whether a finished item advances to the next (default `false`)
 - `repeatMode`: `off`, `one` or `all` (default `off`)
 - `preloadRadius`: How many items either side of the active one are warmed after a load (default `2`, `0` disables)
+
+#### Prerendering
+- `prerender(source)`: Prerender a source on a hidden surface; completes with a `FastPixPrerenderResult` (`status`, `errorCode`). Never throws
+- `cancelPrerender(playbackId)`, `prerenderStatusOf(playbackId)`: A `FastPixPrerenderStatus` — `idle`, `preparing`, `frameReady`, `skipped`, `failed`, `released`
+- `updatePrerenderConfiguration(configuration)`: Change the prerender settings at runtime, without a reload
 
 #### Skip segment control
 - `activeSkipSegment`: The segment playback is inside, or `null`
@@ -1162,23 +1430,34 @@ The main data source class that handles streaming configuration:
 #### Optional Parameters
 - `title`: Optional title for the stream
 - `description`: Optional description
-- `customDomain`: Custom streaming domain (defaults to `stream.fastpix.com`)
+- `customDomain`: Custom streaming domain, as a full host (defaults to `stream.fastpix.com`). The seek-preview images host is derived from it — see [Seek preview](#seek-preview-spritesheets)
+- `thumbnailUrl`: The image sent to a Chromecast receiver, as an `http(s)` URL; `videoData.thumbnailUrl` is used when it is `null`
 - `token`: Authentication token for protected streams ([how to generate](https://fastpix.com/docs/video-security/generate-jwts-for-secure-media))
 - `drmConfiguration`: DRM configuration for protected media. Requires `token` to be set as well
-- `streamType`: Set to `StreamType.onDemand | StreamType.live` for live streams
+- `streamType`: `StreamType.onDemand` (default) or `StreamType.live`
+- `duration`: The video's duration, when known ahead of playback
 - `headers`: Optional HTTP headers for authentication
-- `cacheEnabled`: Enable/disable the player's playback cache. Honoured on Android, including for DRM sources; ignored on iOS HLS, where it cannot coexist with AVFoundation's single resource-loader slot. This flag covers caching *during* playback only — caching a source ahead of time is a separate API, `FastPixPrecacheManager`
+- `cacheEnabled`: Enable/disable the player's playback cache (default `true`). Honoured on Android, including for DRM sources; ignored on iOS HLS, where the engine's caching proxy does not survive a signed FastPix URL — see [DRM Protected Media](#drm-protected-media). This flag covers caching *during* playback only — caching a source ahead of time is a separate API, `FastPixPrecacheManager`
+- `cacheDirectory`, `maxCacheSize`: Where the playback cache lives and how large it may grow
+- `bufferingConfiguration`: How much media is buffered before the first frame and ahead of the playhead. Defaults to the engine's own values; `fastPixPlayStartBuffering` trades a larger starting buffer for a faster first frame. Android only, and part of the preload adoption fingerprint
 - `loop`: Enable/disable video looping
 - `resolution`, `minResolution`, `maxResolution`, `renditionOrder`: Quality parameters, sent to FastPix as URL parameters — see [Quality Control](#quality-control)
-- `showSubtitles`: Whether to show subtitles by default
+- `subtitles`: External subtitle files, as `FastPixPlayerSubtitle`s, offered alongside any the manifest declares. Also sent to a Chromecast receiver
+- `useHlsSubtitles`: Whether captions declared inside the HLS manifest are offered (default `true`)
+- `showSubtitles`: Whether an external track is selected before playback starts — the `isDefault` one, else the first. In-manifest tracks are offered but start off
 - `skipSegments`: Intro, recap, song and credits ranges the player offers to skip — see [Skip segments](#skip-segments)
-- `startAt` / `endAt`: Play only part of the source
+- `startAt`: Where playback of this source begins, or `null` for the start. The player is positioned there before the first frame is shown, so a resumed video never flashes its opening seconds, and a playlist item carrying one starts there every time it is loaded
+- `endAt`: Where playback of this source ends
+- `videoData`, `customData`: Metadata sent to FastPix analytics
 
 #### Properties
 - `drmEnabled`: Whether this source is DRM protected
+- `url`: The resolved stream URL, carrying the playback token and quality parameters
+- `imagesHost`: The origin spritesheets are fetched from, or `null` when `customDomain` has none to derive
 
 #### Factory Constructors
 - `FastPixPlayerDataSource.hls()`: Create an HLS data source
+- `FastPixPlayerDataSource.fromJson()`: Create one from a playlist JSON entry
 
 ### FastPixPlayerConfiguration
 
@@ -1188,6 +1467,10 @@ positional and required — they identify the stream to FastPix analytics.
 - `workSpaceId`, `viewerId`, `beaconUrl` (positional, required)
 - `controlsConfiguration`: A `FastPixPlayerControlsConfiguration`
 - `qualityConfiguration`: A `FastPixPlayerQualityConfiguration`
+- `spritesheetConfiguration`: A `FastPixPlayerSpritesheetConfiguration` — `enableSpritesheet` (default `true`), `enableAdvancedSpritesheet` (default `false`), `advancedSpritesheetInterval` (1 to 10, default `10`)
+- `videoFit`: `FastPixVideoFit.contain` (default) or `cover`. See [Aspect Ratio](#aspect-ratio)
+- `prerenderConfiguration`: A `FastPixPlayerPrerenderConfiguration` — `enablePrerender` (default `true`), `prerenderOnCellular` (default `true`). See [Prerendering](#prerendering)
+- `enableNowPlaying` (default `true`): Shows the playing source on the lock screen and in Control Center (title, duration, position), with play, pause and seek from there. Turn it off if your app manages Now Playing itself. iOS only; ignored elsewhere
 - `copyWith()`: Create a copy with updated values
 
 ### FastPixPlayerControlsConfiguration
@@ -1196,7 +1479,8 @@ Governs the bundled skin. Ignored by a custom UI built on `FastPixVideoSurface`.
 
 - Visibility: `showControls`, `controlsVisibility`, `controlsAutoHideDuration`, `controlsShowDuration`
 - Buttons: `showPlayPauseButton`, `showProgressBar`, `showTimeIndicator`, `showFullscreenButton`, `showQualitySelector`, `showSubtitleSelector`, `showVolumeSlider`, `showSeekBar`, `enableRetry`
-- Playlist and skips: `showPlaylistControls`, `showPlaylistPanel`, `enableSkips` (default `false`)
+- `enableSkips` (default `false`): The ±10 second seek buttons. Unrelated to [skip segments](#skip-segments), which have no bundled button
+- Playlist: `showPlaylistControls`, `showPlaylistPanel`
 - Cast: `showCastWhenNoDevices` (default `true`)
 - Playback: `autoPlay`
 - Colours: `controlsBackgroundColor`, `controlsForegroundColor`, `progressBarColor`, `progressBarPlayedColor`, `progressBarBufferedColor`
@@ -1338,6 +1622,13 @@ Thrown when a playlist cannot be played:
 - `message`: Human readable description
 - `itemIndex`: Position of the offending entry, when the failure is about one
 
+### FastPixSpritesheet / FastPixSpritesheetTile
+
+The active source's seek-preview sheet, and one tile in it:
+
+- Sheet: `type` (`normal` or `advanced`), `imageUrl`, `tileWidth`, `tileHeight`, `duration`, `interval` (advanced only), `tiles`, `tileAt(position)`
+- Tile: `index`, `start`, `end`, `region` — the tile's rectangle in the image
+
 ### FastPixPlaybackState
 
 Everything a control bar draws itself from: `position`, `duration`,
@@ -1367,20 +1658,36 @@ Emitted for every cast failure:
 ### Widgets
 
 #### FastPixPlayer
-Basic player widget with minimal controls.
+The player with the bundled control skin.
 
-DRM related properties:
+- `controller` (required): The player controller
+- `width`, `height`: Fixed size
+- `aspectRatio`, `matchVideoAspectRatio`: The player's shape — 16:9 by default. See [Aspect Ratio](#aspect-ratio)
+- `showLoadingIndicator` (default `true`), `loadingIndicatorColor`
+- `placeholderWidgetBuilder`: What is drawn before the first frame
+- `castController`, `onCastPressed`: Put the cast glyph in the control bar. See [Player Widget With A Cast Button](#player-widget-with-a-cast-button)
+- `castOverlayBuilder`: Replaces what is drawn while playback is on a Chromecast
+- `pipBuilder`: Content for the Picture-in-Picture window
 - `drmErrorWidgetBuilder`: Builder for the DRM failure state. Takes precedence over `errorWidgetBuilder` for DRM failures
 - `errorWidgetBuilder`: Builder for the generic failure state
 - `diagnoseErrors`: Whether to probe the FastPix endpoints after a failure to work out its real cause (default `true`)
 
 #### FastPixVideoSurface
-Headless video surface for a custom UI — video and nothing else.
+Headless video surface for a custom UI — video, plus the failure panel, and nothing else.
 
-- `controller`: The player controller
-- `aspectRatio`: Overrides the video's own ratio
-- `backgroundColor`, `placeholder`: What is drawn behind and before the first frame
+- `controller` (required): The player controller
+- `aspectRatio`, `matchVideoAspectRatio`: The surface's shape — 16:9 by default. See [Aspect Ratio](#aspect-ratio)
+- `backgroundColor` (default black), `placeholder`: What is drawn behind and before the first frame
 - `pipBuilder`: Content for the Picture-in-Picture window
+- `errorBuilder`: Replaces the failure panel. See [When playback fails](#when-playback-fails)
+- `diagnoseErrors`: Whether the failure panel probes the FastPix endpoints (default `true`)
+
+#### FastPixSeekPreview
+Seek-preview thumbnail for a position — the tile, or only the time when no image is available.
+
+- `controller`, `position` (required)
+- `width`: Thumbnail width; height follows the tile's aspect ratio (default `160`)
+- `showTime`: Whether the time is drawn beneath the thumbnail (default `true`)
 
 #### FastPixPlaylistPanel
 The playlist queue drawn over the video, with the active item marked.
@@ -1445,6 +1752,9 @@ The controller-based API ensures predictable behavior by centralizing all data s
 - **Skip Segments**: Intro, recap, song and credits ranges with a skip offered in place
 - **Custom UI**: A headless video surface plus the full functionality API behind your own controls
 - **Picture-in-Picture**: PiP on Android and iOS, with automatic entry on backgrounding
+- **Seek Preview**: Spritesheet thumbnails for any position, normal or advanced interval
+- **Preloading and Precaching**: Warm upcoming sources in memory or on disk, best effort
+- **Prerendering**: The next playlist item held ready on a hidden surface, so transitions show video at once
 - **Chromecast**: Discovery, session management, and handoff between local and receiver playback
 - **Error Handling**: Comprehensive error management
 

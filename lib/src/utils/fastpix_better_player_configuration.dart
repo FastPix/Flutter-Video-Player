@@ -1,7 +1,12 @@
 import 'package:better_player_plus/better_player_plus.dart';
+// `BetterPlayerConfiguration.aspectRatioIOS` is public but its enum is not
+// exported from the package barrel, so it can only be named from here.
+// ignore: implementation_imports
+import 'package:better_player_plus/src/enum/aspect_enum.dart';
 import 'package:flutter/material.dart';
 
 import '../enums/fastpix_controls_visibility.dart';
+import '../enums/fastpix_video_fit.dart';
 import '../fastpix_player_configuration.dart';
 import '../models/fastpix_player_controls_configuration.dart';
 import '../models/fastpix_player_data_source.dart';
@@ -82,19 +87,27 @@ BetterPlayerConfiguration buildBetterPlayerConfiguration({
   FastPixPlayerDataSource? dataSource,
 }) {
   final controlConfiguration = configuration?.controlsConfiguration;
+  final videoFit = configuration?.videoFit ?? FastPixVideoFit.contain;
   final baseConfig = BetterPlayerConfiguration(
     autoPlay: controlConfiguration?.autoPlay ?? false,
     looping: dataSource?.loop ?? false,
     aspectRatio: 16 / 9,
-    fit: BoxFit.contain,
+    // Both, because each platform reads only one: the Flutter-side `fit` is
+    // skipped on iOS, where the engine draws the platform view unfitted and
+    // scales through the layer's video gravity instead. Left at the engine's
+    // default, that gravity is `resizeAspectFill` — iOS cropped what Android
+    // letterboxed.
+    fit: videoFit.boxFit,
+    aspectRatioIOS: videoFit.iosGravity,
     // Lifecycle pausing is owned by FastPixLifecycleManager instead. The
     // engine's version pauses on every backgrounding, including the one that
     // follows entering Picture-in-Picture — which froze the PiP window the
     // instant it became the only thing on screen. Ours makes the same
     // foreground/background decision, minus that case.
     //
-    // The 16:9 above stays as the shape used until the engine reports a size;
-    // the controller replaces it per source through setOverriddenAspectRatio.
+    // The 16:9 above is only the engine's fallback shape: the player widgets
+    // replace it with their own box's ratio through setOverriddenAspectRatio,
+    // so the engine's inner box always matches the one it is drawn in.
     handleLifecycle: false,
     controlsConfiguration: buildControlsConfiguration(controlConfiguration),
     // Set on both the warm and the playing path, and identically: this lands
@@ -109,6 +122,22 @@ BetterPlayerConfiguration buildBetterPlayerConfiguration({
   );
 
   return baseConfig;
+}
+
+/// The engine's two spellings of a [FastPixVideoFit], one per platform.
+extension FastPixVideoFitEngine on FastPixVideoFit {
+  /// Read on Android, where the engine fits the texture with a `FittedBox`.
+  BoxFit get boxFit => switch (this) {
+    FastPixVideoFit.contain => BoxFit.contain,
+    FastPixVideoFit.cover => BoxFit.cover,
+  };
+
+  /// Read on iOS, where it becomes the `AVPlayerLayer` video gravity: the
+  /// engine maps `aspect` to `resizeAspect` and `fill` to `resizeAspectFill`.
+  AspectRatioTypeIOS get iosGravity => switch (this) {
+    FastPixVideoFit.contain => AspectRatioTypeIOS.aspect,
+    FastPixVideoFit.cover => AspectRatioTypeIOS.fill,
+  };
 }
 
 /// Map the FastPix controls configuration onto better_player's.
@@ -253,6 +282,9 @@ String betterPlayerConfigurationFingerprint({
     // --- read by buildBetterPlayerConfiguration ---
     controls?.autoPlay,
     dataSource?.loop,
+    // Resolved rather than read through `?.`: an absent configuration builds
+    // exactly like a default one, so the two must not refuse each other.
+    (configuration?.videoFit ?? FastPixVideoFit.contain).name,
 
     // --- read by buildControlsConfiguration ---
     controls?.controlsForegroundColor,
@@ -274,9 +306,6 @@ String betterPlayerConfigurationFingerprint({
     controls?.enableSkips,
 
     // --- baked into the warmed player by setupDataSource ---
-    // A warmed player is already positioned, so a different startAt would
-    // begin playback in the wrong place.
-    dataSource?.startAt?.inMilliseconds,
     // On this SDK the resolution caps are URL query parameters, so a warm at
     // one cap is holding a genuinely different manifest.
     dataSource?.minResolution?.name,

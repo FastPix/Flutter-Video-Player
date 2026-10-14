@@ -89,4 +89,46 @@ void main() {
     expect(isPlaying(controller), isTrue);
     await controller.dispose();
   });
+
+  group('dismissing the PiP window', () {
+    // The OS reports no new lifecycle state when a window is dismissed from
+    // the background, so without this rule the audio played on with nothing
+    // on screen.
+    test('pauses, and stays paused on return', () async {
+      var inPip = true;
+      final (controller, manager) = await playing(keepsPlaying: () => inPip);
+      manager.attach();
+      manager.didChangeAppLifecycleState(AppLifecycleState.paused);
+
+      inPip = false;
+      manager.onPipDismissed();
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isFalse);
+
+      manager.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isFalse);
+
+      manager.detach();
+      await controller.dispose();
+    });
+
+    test('pauses even when the app was never reported as backgrounded',
+        () async {
+      // Devices that only pause the activity in PiP report `inactive`, never
+      // `paused`, so the rule must not depend on a background report.
+      var inPip = true;
+      final (controller, manager) = await playing(keepsPlaying: () => inPip);
+      manager.attach();
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+
+      inPip = false;
+      manager.onPipDismissed();
+      await PlayerTestHarness.settle();
+
+      expect(isPlaying(controller), isFalse);
+      manager.detach();
+      await controller.dispose();
+    });
+  });
 }

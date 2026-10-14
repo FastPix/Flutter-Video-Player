@@ -3,7 +3,8 @@ import 'package:flutter/material.dart';
 import '../models/demo_stream.dart';
 import '../theme.dart';
 
-/// A poster tile in a home-screen rail.
+/// A video tile in a home-screen rail: a 16:9 gradient tile with the title
+/// and badge line beneath it, as on YouTube.
 class PosterCard extends StatelessWidget {
   const PosterCard({
     super.key,
@@ -11,7 +12,7 @@ class PosterCard extends StatelessWidget {
     required this.gradientIndex,
     required this.onTap,
     this.onLongPress,
-    this.width = 148,
+    this.width = 240,
   });
 
   final DemoStream stream;
@@ -23,61 +24,69 @@ class PosterCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.posterGradient(gradientIndex);
+    final radius = BorderRadius.circular(12);
 
     return SizedBox(
       width: width,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          InkWell(
-            onTap: onTap,
-            onLongPress: onLongPress,
-            borderRadius: BorderRadius.circular(12),
-            child: AspectRatio(
-              aspectRatio: 2 / 3,
-              child: Ink(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
-                  gradient: LinearGradient(
-                    colors: colors,
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                ),
-                child: Stack(
-                  children: [
-                    Positioned(
-                      left: 12,
-                      right: 12,
-                      bottom: 12,
-                      child: Text(
-                        stream.title,
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          height: 1.2,
-                          fontWeight: FontWeight.w700,
-                          shadows: <Shadow>[
-                            Shadow(blurRadius: 8, color: Colors.black54),
-                          ],
-                        ),
+          AspectRatio(
+            aspectRatio: 16 / 9,
+            child: ClipRRect(
+              borderRadius: radius,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: colors,
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
                       ),
                     ),
-                    if (stream.isLive)
-                      const Positioned(top: 8, left: 8, child: _LiveBadge()),
-                    if (stream.drmEnabled)
-                      const Positioned(
-                        top: 8,
-                        right: 8,
-                        child: Icon(Icons.lock, size: 14, color: Colors.white),
+                  ),
+                  if (stream.isLive)
+                    const Positioned(top: 8, left: 8, child: _LiveBadge()),
+                  if (stream.drmEnabled)
+                    const Positioned(
+                      top: 8,
+                      right: 8,
+                      child: Icon(
+                        Icons.lock,
+                        size: 14,
+                        color: Colors.white,
+                        shadows: <Shadow>[
+                          Shadow(blurRadius: 6, color: Colors.black54),
+                        ],
                       ),
-                  ],
-                ),
+                    ),
+                  // On top, so the ripple shows over the image.
+                  Material(
+                    type: MaterialType.transparency,
+                    child: InkWell(
+                      onTap: onTap,
+                      onLongPress: onLongPress,
+                      borderRadius: radius,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
           const SizedBox(height: 8),
+          Text(
+            stream.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 13,
+              height: 1.25,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 2),
           Text(
             stream.badgeLine,
             style: const TextStyle(
@@ -141,7 +150,8 @@ class PosterRail extends StatelessWidget {
           ),
         ),
         SizedBox(
-          height: 262,
+          // A 240-wide 16:9 thumbnail, two lines of title and the badge line.
+          height: 204,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),

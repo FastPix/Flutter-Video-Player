@@ -154,7 +154,12 @@ class FastPixPlayerDataSource {
   /// own ±10 second buttons.
   final List<FastPixSkipSegment>? skipSegments;
 
-  /// Start time for the video
+  /// Where playback of this source begins, or null for the start.
+  ///
+  /// Applied before the first frame is shown: the player is positioned here
+  /// and only then started, so a resumed video never shows its opening
+  /// seconds first. Belongs to the source, so a playlist item carrying one
+  /// starts there every time it is loaded.
   final Duration? startAt;
 
   /// End time for the video
@@ -170,6 +175,71 @@ class FastPixPlayerDataSource {
   /// pointed at the wrong host costs nothing, throws nothing, and reports
   /// success while warming nothing.
   static const String streamingHost = _baseUrl;
+
+  /// Origin serving images — seek-preview spritesheets — for sources with no
+  /// [customDomain].
+  static const String defaultImagesHost = 'https://images.fastpix.com';
+
+  /// Origin serving this source's images, derived from [customDomain], or null
+  /// when it cannot be derived.
+  ///
+  /// FastPix serves images from the stream host with the token `stream`
+  /// replaced by `images` in the first label, and nothing else changed:
+  ///
+  /// ```
+  /// stream.fastpix.com        -> images.fastpix.com
+  /// stream.fastpix.io         -> images.fastpix.io
+  /// venus-stream.fastpix.dev  -> venus-images.fastpix.dev
+  /// ```
+  ///
+  /// The rule reads the host rather than memorising it. Both native SDKs map
+  /// this with a hard-coded table and both are already wrong — iOS has no
+  /// entry for `stream.fastpix.com`, so production media gets no seek preview
+  /// at all there — because a table stops being correct the moment FastPix
+  /// adds an environment.
+  ///
+  /// No [customDomain] means the stream host is `stream.fastpix.com`, so the
+  /// images host is [defaultImagesHost].
+  ///
+  /// Null means the host is genuinely unknown: a `customDomain` that is an
+  /// apex or vanity host carries nothing to derive from. Callers skip images
+  /// rather than fall back, since a guessed host would only buy a 404 on the
+  /// seek path to reach the same time-only preview.
+  String? get imagesHost {
+    final domain = customDomain?.trim();
+    if (domain == null || domain.isEmpty) return defaultImagesHost;
+
+    // A domain pasted from a browser or a config file may carry a scheme and a
+    // trailing slash; neither belongs in the label being rewritten.
+    // Lowercased because host names are case-insensitive: `Stream.fastpix.co`
+    // plays perfectly well, so it must not be the one spelling that silently
+    // loses seek previews.
+    final bare = domain
+        .replaceFirst(RegExp(r'^[a-zA-Z][a-zA-Z0-9+.-]*://'), '')
+        .replaceAll(RegExp(r'/+$'), '')
+        .toLowerCase();
+    if (bare.isEmpty) return defaultImagesHost;
+
+    final split = bare.indexOf('.');
+    if (split <= 0) return null;
+    final label = bare.substring(0, split);
+    final rest = bare.substring(split);
+
+    // Either the whole label is `stream`, or it is an environment prefix
+    // joined to it by a hyphen (`venus-stream`). Anything else — `xyz`, `cdn`,
+    // `streaming` — is not a FastPix stream host and must not be rewritten.
+    final String imagesLabel;
+    if (label == 'stream') {
+      imagesLabel = 'images';
+    } else if (label.endsWith('-stream')) {
+      imagesLabel =
+          '${label.substring(0, label.length - 'stream'.length)}images';
+    } else {
+      return null;
+    }
+
+    return 'https://$imagesLabel$rest';
+  }
 
   const FastPixPlayerDataSource({
     required this.playbackId,

@@ -2,8 +2,9 @@
 
 A runnable demo of the [`fastpix_video_player`](../) package, built as a small
 streaming app rather than a single playback form. It browses a catalog of
-streams, plays public, private and DRM protected media, casts to Chromecast, and
-puts the preloading and precaching machinery on screen so you can watch it work.
+streams, plays public, private and DRM protected media, casts to Chromecast,
+and puts the preloading, precaching and prerendering machinery on screen so you
+can watch it work.
 
 It uses none of the bundled player skin. Video is drawn by the headless
 `FastPixVideoSurface`, and every control over it belongs to the app, built on
@@ -43,20 +44,35 @@ in the same format, or a gitignored `.env` file with
 otherwise persists to `demo_catalog.json` in the application support directory,
 so streams you add survive a restart.
 
+### Build switches
+
+Each is a `--dart-define`, read at build time:
+
+| Switch | Default | Effect |
+| --- | --- | --- |
+| `FASTPIX_PRERENDER` | `true` | `false` turns prerendering off, to compare transitions without it |
+| `FASTPIX_ADVANCED_SPRITESHEET` | `false` | Starts with advanced seek previews instead of the normal sheet |
+| `FASTPIX_SPRITESHEET_INTERVAL` | `10` | Seconds between advanced thumbnails, 1 to 10 |
+| `FASTPIX_WARM_LOG` | `false` | Logs preload and prerender decisions in profile and release builds; debug builds always log |
+
 ## Using the demo
 
 **Home** is a browse screen: a featured hero and three rails, *Continue
-watching*, *Live now* and *On demand*. Every poster carries a small preload
-status pill. Tapping a poster opens the watch screen with that rail as the
+watching*, *Live now* and *On demand*. Every card carries a small preload
+status pill. Tapping a card opens the watch screen with that rail as the
 playlist; long pressing opens a menu to edit, precache or remove the stream.
 The `+` button adds one.
 
-**Watch** plays the stream and, below it, exposes the parts usually invisible:
+**Watch** plays the stream sized to the video's own aspect ratio
+(`matchVideoAspectRatio`), with a loader in place of a black box while a
+source loads, waits for its first frame or stalls. Below the player it exposes the parts usually invisible:
 
 - *Up next*, with previous and next controls and an **Autoplay next** switch.
   The rail is an SDK playlist: the screen calls `setPlaylist` once and then
   `jumpTo`, and the SDK swaps the source in place rather than the app pushing a
   new screen. Autoplay is `controller.autoPlayNext`, not an app-side listener.
+- A **Picture-in-Picture** switch. See [Picture-in-Picture](#picture-in-picture).
+- A prerender panel. See [Prerendering](#prerendering).
 - A precache panel with its status and the exact byte count written.
 - A warm start badge reading `WARM START · warmed in Nms` or `COLD START`, which
   is the single clearest signal that preloading is doing anything.
@@ -96,6 +112,7 @@ only — no widget there reaches past the SDK to the playback engine.
 | `FastPixPlaybackRateMenu` | `supportedPlaybackRates`, `setPlaybackRate` |
 | `FastPixPlaylistNavButton` | `playlistStateStream`, `next`, `previous` |
 | `FastPixPlaylistTitle` | `playlistStateStream` |
+| `FastPixSeekPreviewMenu` | `setSpritesheetConfiguration` |
 
 Each menu rebuilds when its tracks become available, driven by the readiness
 events `qualityLevelsReady`, `audioTracksReady` and `subtitleTracksReady`, and
@@ -107,12 +124,22 @@ list the SDK already draws.
 Fullscreen is the app's own layout rather than an SDK route, and the same
 control widget is used inline and fullscreen.
 
+The seek bar shows a `FastPixSeekPreview` thumbnail while dragging. The
+**seek previews** menu in the control bar switches between the normal
+spritesheet and the advanced one at 1, 2, 5 or 10 seconds, for the video on
+screen and every one after it, so the two can be compared without a rebuild.
+
 ### Picture-in-Picture
 
 The PiP button calls `controller.pip.togglePip()`, and the watch screen sets
 `controller.pip.autoEnterOnBackground = true`, so leaving the app while playing
 opens a PiP window. Both platforms need the setup in
 [Platform setup](#platform-setup); the example already declares it.
+
+The **Picture-in-Picture** switch under the player sets `controller.pip.enabled`
+and `autoEnterOnBackground` together, for the player on screen and every one
+after it. It is on by default. Turn it off and leaving the app goes straight to
+the background rule instead of opening a window.
 
 ## Chromecast
 
@@ -161,10 +188,29 @@ warming while the watch screen is on top, so it cannot evict the warms that are
 about to be used, and cast awareness is wired up so no local decoder is spent
 while playback is on a receiver.
 
-Precaching writes the master playlist only, from the poster menu or the panel on
+Precaching writes the master playlist only, from the card menu or the panel on
 the watch screen. The panel reports the bytes actually written, which is the
 honest signal: a platform can report success and write nothing. On Android you
 can confirm bytes landed with `adb logcat | grep CacheWorker`.
+
+## Prerendering
+
+On by default, as in the SDK. While an item plays, the next one in the rail is
+prepared on a hidden surface, so Next and autoplay-next show video at once. A
+transition that used it looks like nothing at all, so the **PRERENDER** panel
+on the watch screen is the evidence:
+
+- The item being prerendered, its status (`preparing`, `frameReady`,
+  `skipped`, `failed`, `released`) and, when skipped or failed, the reason code.
+- The last prerender event.
+- Whether the item now playing was promoted from a prerender or loaded
+  normally, with its time to first frame and, when promoted, how long the
+  hidden player took to be ready.
+- A `prerenderOnCellular` switch, applied at once through
+  `updatePrerenderConfiguration` without reloading the video.
+
+Build with `--dart-define=FASTPIX_PRERENDER=false` to compare against
+transitions without it, and grep the log for `PRERENDER promoted`.
 
 ## What it demonstrates
 
@@ -175,7 +221,12 @@ can confirm bytes landed with `adb logcat | grep CacheWorker`.
 - A complete custom UI over `FastPixVideoSurface`, with the reference controls
   in `lib/src/custom_ui/`.
 - Picture-in-Picture through `controller.pip`, including automatic entry when
-  the app goes to the background.
+  the app goes to the background, and switching it off at run time.
+- Prerendering the next playlist item, with `prerenderStatusOf`, the
+  prerender events and `updatePrerenderConfiguration`.
+- `matchVideoAspectRatio` on `FastPixVideoSurface`.
+- Seek previews from spritesheets, switched at run time with
+  `setSpritesheetConfiguration`.
 - Sharing one `FastPixPlayerConfiguration` between preloading and playback,
   which is what makes a warmed player adoptable. A mismatch is refused.
 - `FastPixPreloadManager` under both strategies: called directly on the home
@@ -198,7 +249,9 @@ To watch the SDK's own decisions, including every skip and refusal:
 flutter run | grep -E "preloading|precaching"
 ```
 
-The line worth looking for is `ADOPTED`.
+The line worth looking for is `ADOPTED`, and `PRERENDER promoted` for a
+transition that used a prerender. In profile or release builds add
+`--dart-define=FASTPIX_WARM_LOG=true`.
 
 ## Platform setup
 
@@ -216,7 +269,7 @@ The example declares, in `android/app/src/main/AndroidManifest.xml`:
     android:usesPermissionFlags="neverForLocation" />
 ```
 
-plus the Cast options provider and the media notification service inside
+plus the Cast options provider and the Cast media notification service inside
 `<application>`. Only the internet permission is needed for plain playback; the
 rest are for Chromecast. The runtime nearby devices request is made by the SDK
 from `startDiscovery()`.
@@ -252,8 +305,7 @@ Podfile:
 cd ios && pod install
 ```
 
-Picture-in-Picture keeps playing while the app is in the background, which needs
-the audio background mode in `Info.plist`:
+Picture-in-Picture keeps playing while the app is in the background, which needs the audio background mode in `Info.plist`:
 
 ```xml
 <key>UIBackgroundModes</key>

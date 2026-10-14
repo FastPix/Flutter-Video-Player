@@ -50,6 +50,12 @@ class _PreloadEntry {
   /// flight. `setupDataSource` is not cancellable, so the warm-up checks this
   /// after each await and discards whatever it built.
   bool cancelled = false;
+
+  /// Set while a prerender borrows [controller]. A lent entry still counts
+  /// against [FastPixPreloadManager.maxPlayerWindow], and the window, a
+  /// cancel or [FastPixPreloadManager.consume] leave it to its borrower, who
+  /// ends the loan with [FastPixPreloadManager.giveBack].
+  bool lent = false;
 }
 
 /// Warms upcoming sources so the next playback starts without paying for the
@@ -102,6 +108,16 @@ class FastPixPreloadManager {
   final LinkedHashMap<String, _PreloadEntry> _entries =
       LinkedHashMap<String, _PreloadEntry>();
 
+  /// Warmed players still being built, whether or not their entry survives.
+  ///
+  /// Counted separately from [_entries] because a timeout or an eviction
+  /// removes the entry but cannot stop the build: the player keeps loading,
+  /// holding a decoder, until the factory settles. Measured on a device over a
+  /// slow network: without this, 45 warms produced 41 live players against a
+  /// window of 3, because each advance started new builds while the abandoned
+  /// ones were still loading.
+  final Set<Object> _playerBuildsInFlight = <Object>{};
+
   final FastPixPlayerEventManager _eventManager = FastPixPlayerEventManager();
 
   /// Preload lifecycle events. Deliberately separate from the playback error
@@ -130,6 +146,12 @@ class FastPixPreloadManager {
   /// Overridable for tests. See [FastPixWarmedPlayerFactory].
   @visibleForTesting
   FastPixWarmedPlayerFactory? warmedPlayerFactory;
+
+  /// Forget the builds started by a replaced [warmedPlayerFactory]. For
+  /// tests: a fake factory may never settle, and on this singleton its builds
+  /// would otherwise hold the cap for every test that follows.
+  @visibleForTesting
+  void debugForgetPlayerBuilds() => _playerBuildsInFlight.clear();
 
   /// Replace the manifest warmer. For tests.
   @visibleForTesting
@@ -171,7 +193,20 @@ class FastPixPreloadManager {
     final isPlayerStrategy = strategy == FastPixPreloadStrategy.player;
     final effectiveWindow = _effectiveWindow(isPlayerStrategy, window);
 
-    final targets = upcoming.take(effectiveWindow).toList();
+    var targets = upcoming.take(effectiveWindow).toList();
+    // A player lent to a prerender holds a decoder whether or not it is still
+    // in the window, so it takes one of the window's places.
+    if (isPlayerStrategy) {
+      final inWindow = targets.map((source) => source.playbackId).toSet();
+      final lentOutside = _entries.values
+          .where((e) => e.lent && !inWindow.contains(e.source.playbackId))
+          .length;
+      if (lentOutside > 0) {
+        targets = upcoming
+            .take((effectiveWindow - lentOutside).clamp(0, effectiveWindow))
+            .toList();
+      }
+    }
     final wanted = targets.map((source) => source.playbackId).toSet();
 
     FastPixWarmLog.preload(
@@ -247,7 +282,9 @@ class FastPixPreloadManager {
   /// Release every entry that is no longer in [wanted].
   void _evictOutside(Set<String> wanted) {
     for (final key in _entries.keys.toList()) {
-      if (!wanted.contains(key)) _release(key, cancelled: true);
+      if (!wanted.contains(key) && !_entries[key]!.lent) {
+        _release(key, cancelled: true);
+      }
     }
   }
 
@@ -281,6 +318,13 @@ class FastPixPreloadManager {
         reason: 'warmDrm=false',
       );
       return 'skipped: DRM source and warmDrm=false';
+    }
+    // The window caps entries; this caps decoders. Skipped rather than queued:
+    // the next preload() call re-declares the window and picks it up then.
+    if (_playerBuildsInFlight.length >= maxPlayerWindow) {
+      return 'skipped: ${_playerBuildsInFlight.length} earlier warm players '
+          'are still loading (cap $maxPlayerWindow), so another would only '
+          'add a decoder on a network that is not keeping up';
     }
     return null;
   }
@@ -499,11 +543,32 @@ class FastPixPreloadManager {
     // playing — and acquires a licence that cannot decrypt the video it was
     // warmed for. Playback then adopts it and shows a black frame.
     //
-    // Best effort, and a no-op off iOS or on a source without FairPlay.
-    await FastPixFairPlayBridge.configure(entry.source);
+    // Counted before the first await, so a preload() call that starts several
+    // warms in one pass sees each of them against the cap.
+    final build = Object();
+    _playerBuildsInFlight.add(build);
+    final BetterPlayerController controller;
+    try {
+      // Best effort, and a no-op off iOS or on a source without FairPlay.
+      await FastPixFairPlayBridge.configure(entry.source);
 
-    final factory = warmedPlayerFactory ?? _createWarmedPlayer;
-    final controller = await factory(entry.source, warmConfiguration);
+      final factory = warmedPlayerFactory ?? _createWarmedPlayer;
+      controller = await factory(entry.source, warmConfiguration);
+    } finally {
+      _playerBuildsInFlight.remove(build);
+    }
+
+    // [warmTimeout] in [_warm] stops the waiting, not the build, so the player
+    // can land after its entry was failed or evicted. Nothing would ever
+    // adopt or dispose it then.
+    if (entry.cancelled || entry.status != FastPixPreloadStatus.loading) {
+      FastPixWarmLog.preload(
+        'player arrived after the warm was ${entry.status.name} — released',
+        playbackId: entry.source.playbackId,
+      );
+      controller.dispose(forceDispose: true);
+      return;
+    }
     entry.controller = controller;
   }
 
@@ -514,6 +579,11 @@ class FastPixPreloadManager {
     final controller = BetterPlayerController(configuration);
 
     final ready = Completer<void>();
+    // A failed load fails both `setupDataSource` and this, and the first
+    // throws before this is awaited — so its error was left unhandled at the
+    // root zone, logged on every warm-up made offline. Awaiting it below
+    // still sees the error.
+    ready.future.ignore();
     void listener(BetterPlayerEvent event) {
       if (ready.isCompleted) return;
       switch (event.betterPlayerEventType) {
@@ -530,11 +600,16 @@ class FastPixPreloadManager {
 
     controller.addEventsListener(listener);
     try {
-      await controller.setupDataSource(source.toBetterPlayerDataSource());
-      // `setupDataSource` returns once the source is handed to the platform.
-      // `initialized` is what says a first frame is actually decodable — and
-      // for DRM, that the licence has been acquired.
-      await ready.future;
+      // Bounded as a whole: a stalled load emits neither `initialized` nor
+      // `exception`, and `setupDataSource` itself awaits the engine's
+      // initialization, so an unbounded wait on either keeps the player alive
+      // for good.
+      await () async {
+        await controller.setupDataSource(source.toBetterPlayerDataSource());
+        // `initialized` is what says a first frame is actually decodable —
+        // and for DRM, that the licence has been acquired.
+        await ready.future;
+      }().timeout(warmTimeout);
       return controller;
     } catch (_) {
       controller.dispose(forceDispose: true);
@@ -599,6 +674,16 @@ class FastPixPreloadManager {
       return null;
     }
 
+    // The prerender that borrowed it hands it over itself, through
+    // [giveBack], so it is never adopted twice.
+    if (entry.lent) {
+      FastPixWarmLog.preload(
+        'not adopted here — the warm player is lent to a prerender',
+        playbackId: playbackId,
+      );
+      return null;
+    }
+
     final controller = entry.controller;
     if (controller == null) {
       FastPixWarmLog.preload(
@@ -645,13 +730,134 @@ class FastPixPreloadManager {
   /// Call this on eviction or teardown — **never on player mount**. Adoption
   /// happens after mount, and a warm needs several hundred milliseconds, so
   /// cancelling at mount throws away exactly the work about to be adopted.
-  void cancel(String playbackId) => _release(playbackId, cancelled: true);
+  ///
+  /// A player lent to a prerender is left to its borrower.
+  void cancel(String playbackId) {
+    if (_entries[playbackId]?.lent ?? false) return;
+    _release(playbackId, cancelled: true);
+  }
 
   /// Release everything. For queue teardown or memory pressure.
+  ///
+  /// A player lent to a prerender is left to its borrower, which releases it
+  /// through [giveBack].
   void clearAll() {
     for (final key in _entries.keys.toList()) {
+      if (_entries[key]!.lent) continue;
       _release(key, cancelled: true);
     }
+  }
+
+  /// Borrow the ready warm player for [playbackId], for a prerender.
+  ///
+  /// Unlike [consume], the entry stays in the window, so the player keeps
+  /// counting against [maxPlayerWindow] and nothing else is warmed into its
+  /// place. Returns null when there is no ready player warmed for
+  /// [fingerprint]; a mismatched one is released, as in [consume].
+  ///
+  /// Every loan ends with [giveBack].
+  BetterPlayerController? lend(
+    String playbackId, {
+    required String fingerprint,
+  }) {
+    final entry = _entries[playbackId];
+    if (entry == null || entry.status != FastPixPreloadStatus.ready) {
+      return null;
+    }
+    if (entry.lent) return null;
+    if (entry.fingerprint != fingerprint) {
+      FastPixWarmLog.preload(
+        'not lent — configuration mismatch, warmed player refused',
+        playbackId: playbackId,
+      );
+      _release(playbackId, cancelled: true);
+      return null;
+    }
+    final controller = entry.controller;
+    if (controller == null) return null;
+    entry.lent = true;
+    FastPixWarmLog.preload('LENT to a prerender', playbackId: playbackId);
+    return controller;
+  }
+
+  /// End the loan of [playbackId]'s warm player.
+  ///
+  /// [promoted] hands the player over for good: the entry goes and the player
+  /// is left running, now owned by the controller that promoted it.
+  /// With [keepWarm] the player goes back into the window, adoptable again,
+  /// for a prerender that could not finish. Otherwise the player is released
+  /// with `forceDispose` and the entry goes.
+  void giveBack(
+    String playbackId, {
+    required bool promoted,
+    bool keepWarm = false,
+  }) {
+    final entry = _entries[playbackId];
+    if (entry == null || !entry.lent) return;
+    entry.lent = false;
+    if (!promoted && keepWarm) {
+      FastPixWarmLog.preload(
+        'returned from a prerender — warm and adoptable again',
+        playbackId: playbackId,
+      );
+      return;
+    }
+    if (promoted) {
+      entry.controller = null;
+      _entries.remove(playbackId);
+      FastPixWarmLog.preload(
+        'PROMOTED — the prerendered player is now playing',
+        playbackId: playbackId,
+      );
+      _emit(
+        FastPixPreloadConsumedEvent(
+          timestamp: DateTime.now(),
+          playbackId: playbackId,
+          strategy: entry.strategy,
+          networkType: FastPixNetworkMonitor.instance.current,
+        ),
+      );
+      return;
+    }
+    _release(playbackId, cancelled: true);
+  }
+
+  /// Warm [source] as a player without touching the rest of the window, for
+  /// a prerender whose source is not warm yet.
+  ///
+  /// Returns false, and starts nothing, when the device's warm-player budget
+  /// is already spent or the source may not have a warm player. Watch
+  /// [eventManager] for its ready or failed event.
+  bool warmOne(
+    FastPixPlayerDataSource source, {
+    FastPixPlayerConfiguration? configuration,
+  }) {
+    if (_entries.containsKey(source.playbackId)) return true;
+    final players = _entries.values
+        .where((e) => e.strategy == FastPixPreloadStrategy.player)
+        .length;
+    if (players >= maxPlayerWindow) return false;
+    final skipReason = _playerWarmSkipReason(
+      source,
+      casting: _isCasting,
+      warmDrm: true,
+    );
+    if (skipReason != null) {
+      FastPixWarmLog.preload(skipReason, playbackId: source.playbackId);
+      return false;
+    }
+    unawaited(FastPixNetworkMonitor.instance.start());
+    final entry = _PreloadEntry(
+      source,
+      FastPixPreloadStrategy.player,
+      betterPlayerConfigurationFingerprint(
+        configuration: configuration,
+        dataSource: source,
+      ),
+    );
+    _entries[source.playbackId] = entry;
+    unawaited(_warm(entry, configuration));
+    return true;
   }
 
   /// Release every resource and reset the shared HTTP client.

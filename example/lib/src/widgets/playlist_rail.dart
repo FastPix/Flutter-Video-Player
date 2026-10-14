@@ -91,13 +91,7 @@ class PlaylistRail extends StatelessWidget {
           ),
           Row(
             children: <Widget>[
-              Switch(
-                key: const Key('playlist-autoplay'),
-                value: controller.autoPlayNext,
-                // Autoplay is the player's setting: the app no longer listens
-                // for `finished` and advances by hand.
-                onChanged: (value) => controller.autoPlayNext = value,
-              ),
+              _AutoplaySwitch(controller: controller),
               const Text(
                 'Autoplay next',
                 style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
@@ -129,7 +123,8 @@ class PlaylistRail extends StatelessWidget {
             )
           else
             SizedBox(
-              height: 132,
+              // A 168-wide 16:9 thumbnail, the label and the title.
+              height: 150,
               child: ListView.separated(
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(vertical: 8),
@@ -168,4 +163,30 @@ class PlaylistRail extends StatelessWidget {
     }
     await controller.jumpTo(index);
   }
+}
+
+/// The "Autoplay next" switch.
+///
+/// Autoplay is the player's setting — the app no longer listens for
+/// `finished` and advances by hand — but the player publishes no change when
+/// it is set, so the switch redraws itself. Left to the rail's playlist
+/// stream, it showed the old value until something unrelated rebuilt the page
+/// (a play or pause did), and a second tap sent the same value again.
+class _AutoplaySwitch extends StatefulWidget {
+  const _AutoplaySwitch({required this.controller});
+
+  final FastPixPlayerController controller;
+
+  @override
+  State<_AutoplaySwitch> createState() => _AutoplaySwitchState();
+}
+
+class _AutoplaySwitchState extends State<_AutoplaySwitch> {
+  @override
+  Widget build(BuildContext context) => Switch(
+        key: const Key('playlist-autoplay'),
+        value: widget.controller.autoPlayNext,
+        onChanged: (value) =>
+            setState(() => widget.controller.autoPlayNext = value),
+      );
 }

@@ -485,6 +485,12 @@ class FastPixCastController {
   /// A refusal is reported but does not abort discovery: the permission does
   /// not exist below Android 13, and treating "not granted" as fatal would
   /// break discovery on devices where it works fine.
+  /// Whether the system prompt has been shown in this process.
+  ///
+  /// Static because the example app rebuilds its controller (a segment-format
+  /// change), and a new controller must not re-open the prompt either.
+  static bool _nearbyPermissionRequested = false;
+
   Future<void> _requestNearbyDevicesPermission() async {
     if (!Platform.isAndroid) return;
 
@@ -497,8 +503,20 @@ class FastPixCastController {
     if (await _androidSdkInt() < 33) return;
 
     try {
+      // Asked once per process; every later call only reads the status.
+      // permission_handler launches the system permission activity on every
+      // `request()` that is not already granted — a permanent denial included,
+      // where it closes at once. That pauses and resumes the host activity,
+      // and discovery is (correctly) restarted on resume, which requested
+      // again: after "Don't allow" the app looped through that forever,
+      // seen on device as a lagging app. A grant never looped
+      // because a granted request launches nothing.
+      final bool firstAsk = !_nearbyPermissionRequested;
+      _nearbyPermissionRequested = true;
       final PermissionStatus status =
-          await Permission.nearbyWifiDevices.request();
+          firstAsk
+              ? await Permission.nearbyWifiDevices.request()
+              : await Permission.nearbyWifiDevices.status;
       if (status.isGranted || status.isLimited) return;
 
       _emitError(

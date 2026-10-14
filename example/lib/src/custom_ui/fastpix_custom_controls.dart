@@ -1,12 +1,14 @@
 import 'package:fastpix_video_player/fastpix_video_player.dart';
 import 'package:flutter/material.dart';
 
+import '../playback_config.dart';
 import 'fastpix_audio_track_menu.dart';
 import 'fastpix_play_pause_button.dart';
 import 'fastpix_playback_rate_menu.dart';
 import 'fastpix_playlist_nav_buttons.dart';
 import 'fastpix_quality_menu.dart';
 import 'fastpix_seek_bar.dart';
+import 'fastpix_seek_preview_menu.dart';
 import 'fastpix_subtitle_menu.dart';
 
 /// The app-owned control layer for the headless [FastPixVideoSurface].
@@ -32,6 +34,7 @@ class FastPixCustomControls extends StatefulWidget {
     required this.isFullscreen,
     required this.onToggleFullscreen,
     this.onCastPressed,
+    this.leadingInset = 0,
   });
 
   final FastPixPlayerController controller;
@@ -46,6 +49,10 @@ class FastPixCustomControls extends StatefulWidget {
   /// the controller's own `toggleCast()`; the app passes its own handler to
   /// open a device picker instead.
   final VoidCallback? onCastPressed;
+
+  /// Width kept clear at the top-left for the host's own chrome — the page's
+  /// back button — so the top bar never slides underneath it.
+  final double leadingInset;
 
   @override
   State<FastPixCustomControls> createState() => _FastPixCustomControlsState();
@@ -100,7 +107,13 @@ class _FastPixCustomControlsState extends State<FastPixCustomControls> {
             duration: const Duration(milliseconds: 200),
             // When hidden, let taps fall through so the whole surface stays a
             // tap-to-show target.
-            child: IgnorePointer(ignoring: !_visible, child: _buildBars()),
+            child: IgnorePointer(
+              ignoring: !_visible,
+              child: LayoutBuilder(
+                builder: (context, constraints) =>
+                    _buildBars(playerHeight: constraints.maxHeight),
+              ),
+            ),
           ),
         ),
         // Outside the fade: an open queue stays put while the controls behind
@@ -114,7 +127,11 @@ class _FastPixCustomControlsState extends State<FastPixCustomControls> {
     );
   }
 
-  Widget _buildBars() {
+  /// Share of the player's height the seek preview's thumbnail may take, so
+  /// it never covers most of the video it is previewing.
+  static const double _previewHeightFraction = 0.4;
+
+  Widget _buildBars({required double playerHeight}) {
     final controller = widget.controller;
     return DecoratedBox(
       decoration: const BoxDecoration(
@@ -134,61 +151,80 @@ class _FastPixCustomControlsState extends State<FastPixCustomControls> {
             // Top bar: track/speed menus + PiP + cast toggle.
             Positioned(
               top: 0,
-              left: 0,
+              left: widget.leadingInset,
               right: 0,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  // Opens the queue: previous/next walk the playlist a step at
-                  // a time, this is how the viewer reaches any item directly.
-                  _PlaylistPanelButton(
-                    controller: controller,
-                    onPressed: () => setState(() => _playlistOpen = true),
+              // Scaled down rather than overflowing: with every menu present
+              // this row is ~430px, wider than a portrait reel's box.
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Opens the queue: previous/next walk the playlist a step at
+                      // a time, this is how the viewer reaches any item directly.
+                      _PlaylistPanelButton(
+                        controller: controller,
+                        onPressed: () => setState(() => _playlistOpen = true),
+                      ),
+                      FastPixQualityMenu(controller: controller),
+                      FastPixAudioTrackMenu(controller: controller),
+                      FastPixSubtitleMenu(controller: controller),
+                      FastPixPlaybackRateMenu(controller: controller),
+                      // Greyed out while the "Picture-in-Picture" switch is
+                      // off, rather than a button that silently does nothing.
+                      ValueListenableBuilder<bool>(
+                        valueListenable: demoPip,
+                        builder: (context, enabled, _) => IconButton(
+                          color: Colors.white,
+                          disabledColor: Colors.white38,
+                          icon: const Icon(Icons.picture_in_picture_alt_rounded),
+                          tooltip: 'Picture in Picture',
+                          onPressed:
+                              enabled ? () => controller.pip.togglePip() : null,
+                        ),
+                      ),
+                      _CastButton(
+                        controller: controller,
+                        onPressed: widget.onCastPressed,
+                      ),
+                    ],
                   ),
-                  FastPixQualityMenu(controller: controller),
-                  FastPixAudioTrackMenu(controller: controller),
-                  FastPixSubtitleMenu(controller: controller),
-                  FastPixPlaybackRateMenu(controller: controller),
-                  IconButton(
-                    color: Colors.white,
-                    icon: const Icon(Icons.picture_in_picture_alt_rounded),
-                    tooltip: 'Picture in Picture',
-                    onPressed: () => controller.pip.togglePip(),
-                  ),
-                  _CastButton(
-                    controller: controller,
-                    onPressed: widget.onCastPressed,
-                  ),
-                ],
+                ),
               ),
             ),
             // Center: skip back / play-pause / skip forward.
             Align(
               alignment: Alignment.center,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  // Outboard of the ±10s pair, which is where the default
-                  // skin's overlay puts them too. Both collapse to nothing
-                  // when no playlist is set.
-                  FastPixPlaylistNavButton.previous(controller: controller),
-                  IconButton(
-                    iconSize: 40,
-                    color: Colors.white,
-                    icon: const Icon(Icons.replay_10_rounded),
-                    onPressed: () => controller.seekBackward(),
-                  ),
-                  const SizedBox(width: 16),
-                  FastPixPlayPauseButton(controller: controller),
-                  const SizedBox(width: 16),
-                  IconButton(
-                    iconSize: 40,
-                    color: Colors.white,
-                    icon: const Icon(Icons.forward_10_rounded),
-                    onPressed: () => controller.seekForward(),
-                  ),
-                  FastPixPlaylistNavButton.next(controller: controller),
-                ],
+              // Scaled down in a narrow box — a reel — rather than overflowing.
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Outboard of the ±10s pair, which is where the default
+                    // skin's overlay puts them too. Both collapse to nothing
+                    // when no playlist is set.
+                    FastPixPlaylistNavButton.previous(controller: controller),
+                    IconButton(
+                      iconSize: 40,
+                      color: Colors.white,
+                      icon: const Icon(Icons.replay_10_rounded),
+                      onPressed: () => controller.seekBackward(),
+                    ),
+                    const SizedBox(width: 16),
+                    FastPixPlayPauseButton(controller: controller),
+                    const SizedBox(width: 16),
+                    IconButton(
+                      iconSize: 40,
+                      color: Colors.white,
+                      icon: const Icon(Icons.forward_10_rounded),
+                      onPressed: () => controller.seekForward(),
+                    ),
+                    FastPixPlaylistNavButton.next(controller: controller),
+                  ],
+                ),
               ),
             ),
             // Bottom: seekbar + fullscreen.
@@ -200,7 +236,17 @@ class _FastPixCustomControlsState extends State<FastPixCustomControls> {
                 padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
                 child: Row(
                   children: [
-                    Expanded(child: FastPixSeekBar(controller: controller)),
+                    Expanded(
+                      child: FastPixSeekBar(
+                        controller: controller,
+                        previewMaxHeight: playerHeight.isFinite
+                            ? playerHeight * _previewHeightFraction
+                            : null,
+                      ),
+                    ),
+                    // Beside the bar whose previews it switches; the top bar
+                    // is already as wide as a portrait phone allows.
+                    FastPixSeekPreviewMenu(controller: controller),
                     IconButton(
                       color: Colors.white,
                       icon: Icon(

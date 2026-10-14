@@ -262,8 +262,8 @@ void main() {
     test('the fingerprint field set is unchanged', () {
       const int fieldCount = 28;
       const String golden =
-          'false|false|~|~|~|~|~|onTap|true|true|true|true|true|true|true|'
-          'true|true|false|false|~|~|~|~|~|25000|6553600|3000|6000';
+          'false|false|contain|~|~|~|~|~|onTap|true|true|true|true|true|true|'
+          'true|true|true|false|false|~|~|~|~|25000|6553600|3000|6000';
 
       final actual = betterPlayerConfigurationFingerprint(
         configuration: config(),
@@ -349,12 +349,6 @@ void main() {
           configuration: config(),
           dataSource: source(loop: true),
         ),
-        // A warmed player is already positioned; adopting one warmed at 0 for
-        // a playback asking for 30s starts in the wrong place.
-        'startAt': betterPlayerConfigurationFingerprint(
-          configuration: config(),
-          dataSource: source(startAt: const Duration(seconds: 30)),
-        ),
         // On this SDK the resolution caps are URL query parameters, so a warm
         // at one cap is holding a genuinely different manifest.
         'maxResolution': betterPlayerConfigurationFingerprint(
@@ -386,6 +380,22 @@ void main() {
         ),
         betterPlayerConfigurationFingerprint(
           configuration: FastPixPlayerConfiguration('ws-b', 'viewer-b', 'url-b'),
+          dataSource: source(),
+        ),
+      );
+    });
+
+    // The start position is applied by seeking an adopted player before it is
+    // started, not baked in at warm time, so a resumed video can still adopt
+    // the player warmed for it.
+    test('startAt does not affect the fingerprint', () {
+      expect(
+        betterPlayerConfigurationFingerprint(
+          configuration: config(),
+          dataSource: source(startAt: const Duration(seconds: 30)),
+        ),
+        betterPlayerConfigurationFingerprint(
+          configuration: config(),
           dataSource: source(),
         ),
       );

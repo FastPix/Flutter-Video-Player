@@ -71,6 +71,7 @@ void main() {
     manager.clearAll();
     manager.isCastActive = null;
     manager.warmedPlayerFactory = null;
+    manager.debugForgetPlayerBuilds();
     for (final type in FastPixPlayerEventTypes.preload) {
       manager.eventManager.removeAllEventListeners(type);
     }

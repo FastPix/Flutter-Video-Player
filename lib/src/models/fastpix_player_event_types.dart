@@ -146,6 +146,25 @@ class FastPixPlayerEventTypes {
   /// without this the two populations are indistinguishable in aggregate.
   static const String preloadConsumed = 'preloadConsumed';
 
+  // Prerender events
+  //
+  // A prerender describes a source that is not playing, so none of these is a
+  // playback event and a failed prerender never reaches [error].
+
+  /// Fired when a prerender is admitted and starts preparing.
+  static const String prerenderRequested = 'prerenderRequested';
+
+  /// Fired when the platform confirms a prerendered frame is ready on the
+  /// hidden surface.
+  static const String prerenderReady = 'prerenderReady';
+
+  /// Fired when a prerender is skipped by policy or cannot reach frame-ready;
+  /// its code says why. Informational only.
+  ///
+  /// Releases and promotions are not events: read them from
+  /// `prerenderStatusOf`.
+  static const String prerenderFailed = 'prerenderFailed';
+
   // Precache events
   //
   // Separate from the preload family: precaching writes the manifest to disk
@@ -164,6 +183,23 @@ class FastPixPlayerEventTypes {
   /// Fired when a manifest download fails, or the source cannot be cached.
   /// Never a playback failure — the manifest is simply fetched from network.
   static const String precacheFailed = 'precacheFailed';
+
+  // Seek-preview spritesheet events
+  //
+  // Informational only: a spritesheet that cannot be used never affects
+  // playback, so failures are reported here and never on [error].
+
+  /// Fired when a spritesheet request begins for the active source.
+  static const String spritesheetLoadStarted = 'spritesheetLoadStarted';
+
+  /// Fired when spritesheet metadata is loaded and positions resolve to tiles.
+  static const String spritesheetLoaded = 'spritesheetLoaded';
+
+  /// Fired when the spritesheet image is decoded and ready to draw.
+  static const String spritesheetImageReady = 'spritesheetImageReady';
+
+  /// Fired when a spritesheet, or its image, could not be used.
+  static const String spritesheetFailed = 'spritesheetFailed';
 
   /// Get all available event types
   static List<String> get all => [
@@ -209,9 +245,16 @@ class FastPixPlayerEventTypes {
     preloadFailed,
     preloadCancelled,
     preloadConsumed,
+    prerenderRequested,
+    prerenderReady,
+    prerenderFailed,
     precacheStarted,
     precacheCached,
     precacheFailed,
+    spritesheetLoadStarted,
+    spritesheetLoaded,
+    spritesheetImageReady,
+    spritesheetFailed,
   ];
 
   /// Get playback-related event types
@@ -251,6 +294,21 @@ class FastPixPlayerEventTypes {
     playlistChanged,
     playlistItemChanged,
     playlistEnded,
+  ];
+
+  /// Get seek-preview spritesheet event types
+  static List<String> get spritesheet => [
+    spritesheetLoadStarted,
+    spritesheetLoaded,
+    spritesheetImageReady,
+    spritesheetFailed,
+  ];
+
+  /// Get prerender event types
+  static List<String> get prerender => [
+    prerenderRequested,
+    prerenderReady,
+    prerenderFailed,
   ];
 
   /// Get skip-segment event types

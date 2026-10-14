@@ -42,9 +42,86 @@ public class FastPixVideoPlayerPlugin: NSObject, FlutterPlugin {
             name: "fastpix_video_player/precache",
             binaryMessenger: registrar.messenger())
         registrar.addMethodCallDelegate(FastPixVideoPlayerPlugin(), channel: channel)
+        precacheChannel = channel
+
+        // What the licence server actually did, forwarded to the side that
+        // counts licences. Dart can only count what this SDK intends to fetch;
+        // the fetch itself happens inside the FairPlay patch, so without this
+        // a protected start that took fifty seconds because the server threw
+        // twice looks identical to one that took four.
+        FastPixFairPlayPatch.acquisitionCallback = { report in
+            // The report arrives on AVFoundation's loader queue. A Flutter
+            // channel is main-thread-only.
+            DispatchQueue.main.async {
+                precacheChannel?.invokeMethod("drmLicenceAcquired", arguments: report)
+            }
+        }
 
         registerPipChannel(with: registrar)
+        registerPrerenderChannel(with: registrar)
+        // Now Playing and the remote commands.
+        FastPixNowPlaying.register(with: registrar)
     }
+
+    // MARK: - Prerender
+
+    private static var prerenderChannel: FlutterMethodChannel?
+
+    /// Layer roles and the first-frame signal for prerendering, per engine
+    /// player (`textureId`). Everything answers `unsupported` unless
+    /// `FastPixPipOwner` has interposed the engine's view factory, which is
+    /// what maps a textureId to its layer; Dart then skips the prerender with
+    /// `featureDisabled` and keeps the warm player.
+    private static func registerPrerenderChannel(with registrar: FlutterPluginRegistrar) {
+        let channel = FlutterMethodChannel(
+            name: "fastpix_video_player/prerender",
+            binaryMessenger: registrar.messenger())
+        let detector = FastPixFirstFrameDetector.shared
+        detector.send = { method, textureId in
+            prerenderChannel?.invokeMethod(
+                method, arguments: ["textureId": NSNumber(value: textureId)])
+        }
+        channel.setMethodCallHandler { call, result in
+            let arguments = call.arguments as? [String: Any]
+            let textureId = (arguments?["textureId"] as? NSNumber)?.int64Value
+            switch call.method {
+            case "isSupported":
+                result(FastPixPipOwner.isPrerenderSupported())
+            case "setRole":
+                if let textureId, let role = arguments?["role"] as? String {
+                    // Marked before the hidden view mounts; restored once it
+                    // is promoted or released.
+                    FastPixPipOwner.setPrerenderRole(role, forTextureId: textureId)
+                    if role != "prerender" { detector.restore(textureId: textureId) }
+                }
+                result(nil)
+            case "stopWatching":
+                if let textureId { detector.stop(textureId: textureId) }
+                result(nil)
+            case "watchFirstFrame":
+                guard FastPixPipOwner.isPrerenderSupported(), let textureId else {
+                    result("unsupported")
+                    return
+                }
+                let positionMs = (arguments?["positionMs"] as? NSNumber)?.int64Value ?? 0
+                let rate = (arguments?["rate"] as? NSNumber)?.doubleValue ?? 1
+                let watching = detector.watch(
+                    textureId: textureId, positionMs: positionMs, rate: rate)
+                result(watching ? "ok" : "unsupported")
+            case "preroll":
+                // Part of `watchFirstFrame`'s sequence; kept for the contract.
+                result(FastPixPipOwner.isPrerenderSupported() ? "ok" : "unsupported")
+            default:
+                result(FlutterMethodNotImplemented)
+            }
+        }
+        prerenderChannel = channel
+    }
+
+    // MARK: - Precache
+
+    /// Held so the FairPlay patch's acquisition reports have somewhere to go.
+    private static var precacheChannel: FlutterMethodChannel?
 
     // MARK: - Picture-in-Picture
 
@@ -63,6 +140,9 @@ public class FastPixVideoPlayerPlugin: NSObject, FlutterPlugin {
         FastPixPipOwner.stateCallback = { active in
             channel.invokeMethod("pipStateChanged", arguments: ["active": active])
         }
+        FastPixPipOwner.dismissedCallback = {
+            channel.invokeMethod("pipDismissed", arguments: nil)
+        }
         FastPixPipOwner.failureCallback = { reason in
             channel.invokeMethod("pipFailed", arguments: ["reason": reason])
         }
@@ -71,6 +151,14 @@ public class FastPixVideoPlayerPlugin: NSObject, FlutterPlugin {
         // own PiP controller, which this SDK no longer builds.
         FastPixPipOwner.playbackCallback = { playing in
             channel.invokeMethod("pipPlaybackChanged", arguments: ["playing": playing])
+        }
+        FastPixPipOwner.screenLockCallback = { locked in
+            channel.invokeMethod("pipScreenLockChanged", arguments: ["locked": locked])
+        }
+        // The mounted player kept refusing to play and its retries were
+        // stopped; Dart pauses so the engine stops asking.
+        FastPixPipOwner.playbackRefusedCallback = {
+            channel.invokeMethod("playbackRefused", arguments: nil)
         }
 
         channel.setMethodCallHandler { call, result in
@@ -106,6 +194,10 @@ public class FastPixVideoPlayerPlugin: NSObject, FlutterPlugin {
                 FastPixPipOwner.install()
                 FastPixPipOwner.setAutoEnterEnabled(args?["enabled"] as? Bool ?? false)
                 result(FastPixPipOwner.isInstalled())
+
+            case "setEnabled":
+                FastPixPipOwner.setEnabled(args?["enabled"] as? Bool ?? true)
+                result(true)
 
             case "setAspectRatio":
                 FastPixPipOwner.setPreferredAspectWidth(

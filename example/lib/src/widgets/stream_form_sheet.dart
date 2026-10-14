@@ -88,47 +88,49 @@ class _StreamFormSheetState extends State<StreamFormSheet> {
     super.dispose();
   }
 
-  void _save() {
-    final playbackId = _playbackId.text.trim();
-    if (playbackId.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('A playback ID is required')),
-      );
-      return;
-    }
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
 
+  /// The trimmed text of [controller], or null when it is blank.
+  static String? _optional(TextEditingController controller) {
+    final text = controller.text.trim();
+    return text.isEmpty ? null : text;
+  }
+
+  List<FastPixPlayerSubtitle> _subtitles() {
     final subtitleUrl = _subtitleUrl.text.trim();
-    final subtitles = <FastPixPlayerSubtitle>[
+    return <FastPixPlayerSubtitle>[
       if (subtitleUrl.isNotEmpty)
         FastPixPlayerSubtitle(
           url: subtitleUrl,
-          name:
-              _subtitleLabel.text.trim().isEmpty
-                  ? 'Subtitles'
-                  : _subtitleLabel.text.trim(),
-          languageCode:
-              _subtitleLanguage.text.trim().isEmpty
-                  ? null
-                  : _subtitleLanguage.text.trim(),
+          name: _optional(_subtitleLabel) ?? 'Subtitles',
+          languageCode: _optional(_subtitleLanguage),
           isDefault: true,
         ),
     ];
+  }
 
-    final title = _title.text.trim();
-    final host = _host.text.trim();
-    final token = _token.text.trim();
-    final drmToken = _drmToken.text.trim();
-    final drmHost = _drmHost.text.trim();
+  void _save() {
+    final playbackId = _playbackId.text.trim();
+    if (playbackId.isEmpty) {
+      _showError('A playback ID is required');
+      return;
+    }
+
+    final subtitles = _subtitles();
 
     Navigator.pop(
       context,
       DemoStream(
         playbackId: playbackId,
-        title: title.isEmpty ? playbackId : title,
-        streamHost: host.isEmpty ? null : host,
-        drmHost: drmHost.isEmpty ? null : drmHost,
-        token: token.isEmpty ? null : token,
-        drmToken: drmToken.isEmpty ? null : drmToken,
+        title: _optional(_title) ?? playbackId,
+        streamHost: _optional(_host),
+        drmHost: _optional(_drmHost),
+        token: _optional(_token),
+        drmToken: _optional(_drmToken),
         drmEnabled: _drmEnabled,
         isLive: _isLive,
         subtitles: subtitles,
@@ -155,137 +157,10 @@ class _StreamFormSheetState extends State<StreamFormSheet> {
             controller: scrollController,
             padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
             children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              Text(
-                isEditing ? 'Edit stream' : 'Add a stream',
-                style: const TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 4),
-              const Text(
-                'Use a playback ID that has reached "ready" in the FastPix '
-                'dashboard.',
-                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-              ),
-              const SizedBox(height: 24),
-
-              const _SectionLabel('Source'),
-              TextField(
-                controller: _playbackId,
-                decoration: const InputDecoration(labelText: 'Playback ID'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _title,
-                decoration: const InputDecoration(
-                  labelText: 'Title (optional)',
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _host,
-                decoration: const InputDecoration(
-                  labelText: 'Stream host',
-                  helperText: 'Blank uses stream.fastpix.com',
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _token,
-                decoration: const InputDecoration(
-                  labelText: 'Token (private / DRM streams only)',
-                ),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _isLive,
-                onChanged: (value) => setState(() => _isLive = value),
-                title: const Text('Live stream'),
-              ),
-
-              const _SectionLabel('DRM'),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _drmEnabled,
-                onChanged: (value) => setState(() => _drmEnabled = value),
-                title: const Text('DRM protected'),
-                subtitle: const Text(
-                  'Leave off for ordinary streams. DRM media only.',
-                ),
-              ),
-              if (_drmEnabled) ...[
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _drmToken,
-                  decoration: const InputDecoration(labelText: 'DRM token'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _drmHost,
-                  decoration: const InputDecoration(
-                    labelText: 'DRM host',
-                    // The licence is a second origin, and pointing it at the
-                    // wrong environment fails at the handshake — which reads
-                    // like a bad token, not a wrong host.
-                    helperText: 'Blank uses api.fastpix.com. Match the stream '
-                        'host environment.',
-                  ),
-                ),
-              ],
-
-              const _SectionLabel('External subtitles'),
-              const Text(
-                'Optional. Captions inside the HLS manifest are picked up '
-                'automatically and do not need to be listed here.',
-                style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _subtitleUrl,
-                decoration: const InputDecoration(labelText: 'WebVTT URL'),
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _subtitleLabel,
-                      decoration: const InputDecoration(labelText: 'Label'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  SizedBox(
-                    width: 110,
-                    child: TextField(
-                      controller: _subtitleLanguage,
-                      decoration: const InputDecoration(
-                        labelText: 'Lang',
-                        hintText: 'en',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _subtitlesOnByDefault,
-                onChanged:
-                    (value) => setState(() => _subtitlesOnByDefault = value),
-                title: const Text('Start with subtitles on'),
-              ),
-
+              ..._header(isEditing),
+              ..._sourceFields(),
+              ..._drmFields(),
+              ..._subtitleFields(),
               const SizedBox(height: 24),
               FilledButton(
                 onPressed: _save,
@@ -296,6 +171,175 @@ class _StreamFormSheetState extends State<StreamFormSheet> {
         },
       ),
     );
+  }
+
+  /// The grab handle, title and intro.
+  List<Widget> _header(bool isEditing) {
+    return [
+      Center(
+        child: Container(
+          width: 36,
+          height: 4,
+          decoration: BoxDecoration(
+            color: Colors.white24,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+      ),
+      const SizedBox(height: 20),
+      Text(
+        isEditing ? 'Edit stream' : 'Add a stream',
+        style: const TextStyle(
+          fontSize: 22,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+      const SizedBox(height: 4),
+      const Text(
+        'Use a playback ID that has reached "ready" in the FastPix '
+        'dashboard.',
+        style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+      ),
+      const SizedBox(height: 24),
+    ];
+  }
+
+  /// Playback ID, title, host, token and live switch.
+  List<Widget> _sourceFields() {
+    return [
+      const _SectionLabel('Source'),
+      TextField(
+        controller: _playbackId,
+        decoration: const InputDecoration(labelText: 'Playback ID'),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: _title,
+        decoration: const InputDecoration(
+          labelText: 'Title (optional)',
+        ),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: _host,
+        decoration: const InputDecoration(
+          labelText: 'Stream host',
+          helperText: 'Blank uses stream.fastpix.com',
+        ),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: _token,
+        decoration: const InputDecoration(
+          labelText: 'Token (private / DRM streams only)',
+        ),
+      ),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        value: _isLive,
+        onChanged: (value) => setState(() => _isLive = value),
+        title: const Text('Live stream'),
+      ),
+    ];
+  }
+
+  /// The DRM switch, and its token and host once switched on.
+  List<Widget> _drmFields() {
+    return [
+      const _SectionLabel('DRM'),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        value: _drmEnabled,
+        onChanged: (value) => setState(() => _drmEnabled = value),
+        title: const Text('DRM protected'),
+        subtitle: const Text(
+          'Leave off for ordinary streams. DRM media only.',
+        ),
+      ),
+      if (_drmEnabled) ...[
+        const SizedBox(height: 8),
+        TextField(
+          controller: _drmToken,
+          decoration: const InputDecoration(labelText: 'DRM token'),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _drmHost,
+          decoration: const InputDecoration(
+            labelText: 'DRM host',
+            // The licence is a second origin, and pointing it at the
+            // wrong environment fails at the handshake — which reads
+            // like a bad token, not a wrong host.
+            helperText: 'Blank uses api.fastpix.com. Match the stream '
+                'host environment.',
+          ),
+        ),
+      ],
+    ];
+  }
+
+  /// An optional external WebVTT track.
+  List<Widget> _subtitleFields() {
+    return [
+      const _SectionLabel('External subtitles'),
+      const Text(
+        'Optional. Captions inside the HLS manifest are picked up '
+        'automatically and do not need to be listed here.',
+        style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: _subtitleUrl,
+        decoration: const InputDecoration(labelText: 'WebVTT URL'),
+      ),
+      const SizedBox(height: 12),
+      Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _subtitleLabel,
+              decoration: const InputDecoration(labelText: 'Label'),
+            ),
+          ),
+          const SizedBox(width: 12),
+          SizedBox(
+            width: 110,
+            child: TextField(
+              controller: _subtitleLanguage,
+              decoration: const InputDecoration(
+                labelText: 'Lang',
+                hintText: 'en',
+              ),
+            ),
+          ),
+        ],
+      ),
+      // Only means anything with a WebVTT file above: it pre-selects
+      // that track, and `_save` drops it without one. It never touched
+      // captions inside the HLS manifest, but used to be switchable on
+      // its own and read as "turn captions on", so it looked broken.
+      ListenableBuilder(
+        listenable: _subtitleUrl,
+        builder: (context, _) {
+          final hasFile = _subtitleUrl.text.trim().isNotEmpty;
+          return SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: hasFile && _subtitlesOnByDefault,
+            onChanged: hasFile
+                ? (value) =>
+                      setState(() => _subtitlesOnByDefault = value)
+                : null,
+            title: const Text('Show this subtitle track at start'),
+            subtitle: Text(
+              hasFile
+                  ? 'Off: the track is listed in the subtitle menu '
+                        'but starts hidden.'
+                  : 'Add a WebVTT URL above to use this.',
+            ),
+          );
+        },
+      ),
+    ];
   }
 }
 

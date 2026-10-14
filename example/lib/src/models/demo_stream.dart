@@ -76,7 +76,9 @@ class DemoStream {
   static String? _orNull(String? value) =>
       (value?.isEmpty ?? true) ? null : value;
 
-  FastPixPlayerDataSource toDataSource() {
+  /// [startAt] is where playback begins — a resume position — or null for
+  /// the start.
+  FastPixPlayerDataSource toDataSource({Duration? startAt}) {
     final drmConfiguration = !drmEnabled || (drmToken?.isEmpty ?? true)
         ? null
         : FastPixPlayerDrmConfiguration(
@@ -95,6 +97,7 @@ class DemoStream {
       subtitles: subtitles.isEmpty ? null : subtitles,
       showSubtitles: subtitlesOnByDefault,
       videoData: VideoDetailsData(videoId: playbackId, title: title),
+      startAt: startAt,
     );
   }
 

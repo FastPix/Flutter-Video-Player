@@ -15,9 +15,9 @@ import '../models/fastpix_player_event.dart';
 ///
 /// Edge cases the design lists are handled by keeping this a pure state holder:
 /// a scrub started before the duration is known still works (the UI clamps),
-/// a scrub abandoned without release simply leaves [isScrubbing] true until the
-/// next interaction or source change resets it, and a release is clamped to
-/// non-negative here while the caller clamps to the (possibly changed) duration.
+/// a scrub whose seekbar is torn down mid-drag is dropped with [cancelScrub],
+/// and a release is clamped to non-negative here while the caller clamps to
+/// the (possibly changed) duration.
 class FastPixScrubController {
   /// Routes the release seek through the player controller's own `seekTo`, so
   /// scrubbing takes the identical path as any other seek (metrics, events).
@@ -68,6 +68,23 @@ class FastPixScrubController {
       FastPixScrubEndedEvent(timestamp: DateTime.now(), position: target),
     );
     await _seek(target);
+  }
+
+  /// Abandon the scrub without seeking.
+  ///
+  /// For a seekbar removed while the finger is still down — entering
+  /// fullscreen or PiP mid-drag rebuilds the controls, and Flutter disposes
+  /// the old slider's drag without calling its end or cancel callback, so
+  /// [endScrub] never arrives. Without this the scrub target would stand in
+  /// for the playhead until the next drag. No event is emitted: the scrub
+  /// ended event promises a seek, and none is issued.
+  ///
+  /// Returns whether a scrub was in progress.
+  bool cancelScrub() {
+    if (!_isScrubbing) return false;
+    _isScrubbing = false;
+    _scrubPosition = Duration.zero;
+    return true;
   }
 
   /// Drop any in-flight scrub when the source changes.

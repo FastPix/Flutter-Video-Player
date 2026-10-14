@@ -1,6 +1,6 @@
 name: fastpix_video_player
 description: "A high-performance video player for Flutter with advanced features and customizable UI."
-version: 1.1.2
+version: 1.2.0
 homepage: https://github.com/FastPix/Flutter-Video-Player
 repository: https://github.com/FastPix/Flutter-Video-Player
 issue_tracker: https://github.com/FastPix/Flutter-Video-Player/issues
@@ -25,7 +25,7 @@ dependencies:
   # `AVAssetResourceLoader.setDelegate:queue:`, which is the same selector in
   # both, and matches the engine's DRM delegate by name substring so the Swift
   # module prefix does not break it. The pin is about the rest of the surface.
-  better_player_plus: ^1.2.1
+  better_player_plus: 1.2.1
   flutter_chrome_cast: ^1.4.6  #latest version
   # FLAG_SECURE for DRM playback. Android only, which is all that is needed:
   # iOS blanks FairPlay video in recordings without being asked.

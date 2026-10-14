@@ -8,7 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 // reads like a bad token rather than a wrong host.
 
 /// The staging DRM host these tests move the licence and certificate URLs to.
-const String drmHost = 'api.fastpix.com';
+const String drmHost = 'api.fastpix.co';
 
 /// The licence base URL that host resolves to.
 const String drmBaseUrl = 'https://$drmHost/v1/on-demand/drm';
@@ -39,11 +39,11 @@ void main() {
     expect(drm.resolvedBaseUrl, drmBaseUrl);
     expect(
       drm.licenseUrl(playbackId),
-      startsWith('https://api.fastpix.com/v1/on-demand/drm/license/fairplay/'),
+      startsWith('https://api.fastpix.co/v1/on-demand/drm/license/fairplay/'),
     );
     expect(
       drm.certificateUrl(playbackId),
-      startsWith('https://api.fastpix.com/v1/on-demand/drm/cert/fairplay/'),
+      startsWith('https://api.fastpix.co/v1/on-demand/drm/cert/fairplay/'),
     );
     // The token still rides along; moving the host must not drop it.
     expect(drm.licenseUrl(playbackId), contains('token=$token'));
@@ -53,9 +53,9 @@ void main() {
     // Pasted from a browser or a config file, these are the two shapes that
     // would otherwise produce `https://https://…` or a doubled slash.
     for (final domain in <String>[
-      'https://api.fastpix.com',
-      'api.fastpix.com/',
-      'https://api.fastpix.com/',
+      'https://api.fastpix.co',
+      'api.fastpix.co/',
+      'https://api.fastpix.co/',
     ]) {
       final drm = FastPixPlayerDrmConfiguration(
         drmToken: token,
@@ -91,7 +91,7 @@ void main() {
   test('a staging source pairs a staging manifest with a staging licence', () {
     final source = FastPixPlayerDataSource.hls(
       playbackId: playbackId,
-      customDomain: 'stream.fastpix.com',
+      customDomain: 'stream.fastpix.co',
       token: token,
       drmConfiguration: const FastPixPlayerDrmConfiguration(
         drmToken: token,
@@ -100,10 +100,10 @@ void main() {
       ),
     );
 
-    expect(source.url, startsWith('https://stream.fastpix.com/$playbackId.m3u8'));
+    expect(source.url, startsWith('https://stream.fastpix.co/$playbackId.m3u8'));
     expect(
       source.drmConfiguration!.licenseUrl(playbackId),
-      startsWith('https://api.fastpix.com/'),
+      startsWith('https://api.fastpix.co/'),
     );
   });
 

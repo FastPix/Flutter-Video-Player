@@ -9,9 +9,15 @@ import 'package:fastpix_flutter_core_data/fastpix_flutter_core_data.dart';
 import 'package:fastpix_video_player/fastpix_video_player.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_windowmanager_plus/flutter_windowmanager_plus.dart';
+import 'fastpix_prerender_manager.dart';
 import 'managers/fastpix_lifecycle_manager.dart';
+import 'managers/fastpix_now_playing_manager.dart';
+import 'widgets/fastpix_player_slots.dart';
+import 'managers/fastpix_spritesheet_manager.dart';
 import 'models/valid_events.dart';
 import 'utils/fastpix_fairplay_bridge.dart';
+import 'utils/fastpix_aspect_ratio.dart';
+import 'utils/fastpix_prerender_channel.dart';
 
 // Custom-UI mechanism (additive). The managers, models, events, enum and cast
 // controller these members use all reach this file through the package barrel
@@ -24,6 +30,27 @@ class FastPixPlayerController implements PlayerObserver {
     // Every event this player emits says which item it describes, including
     // the ones the managers raise. One place to get right.
     _eventManager.attributionProvider = _eventAttribution;
+    // A prerender never outlives the policy it was made under: PiP or a Cast
+    // session starting releases it.
+    // Cast reports on its own controller's bus; see [attachCastController].
+    _eventManager.addEventListener(
+      FastPixPlayerEventTypes.pipChanged,
+      _reevaluatePrerenderPolicy,
+    );
+    // A PiP request that ends with no window opening announces no
+    // [FastPixPipChangedEvent], yet it declined any prerender asked meanwhile.
+    _pipManager.pendingChanges.addListener(() {
+      if (!_pipManager.isPipActiveOrPending) {
+        scheduleMicrotask(() {
+          if (!_disposed) _retryAutoPrerender();
+        });
+      }
+    });
+    // Registered rather than exposed: the preview widget draws from the
+    // manager's decoded image, which must never become public API.
+    fastPixSpritesheetManagers[this] = _spritesheetManager;
+    // And the hidden slot both of the SDK's surfaces build a prerender in.
+    fastPixPrerenderEngines[this] = _prerenderEngine;
   }
 
   /// Fallback message used when the platform player reports a failure without
@@ -43,7 +70,8 @@ class FastPixPlayerController implements PlayerObserver {
   /// flags such as
   /// [FastPixPlayerControlsConfiguration.showPlaylistControls] without a
   /// second copy of the configuration being threaded through it.
-  FastPixPlayerConfiguration? get configuration => _configuration;
+  FastPixPlayerConfiguration? get configuration =>
+      _withSpritesheetOverride(_configuration);
 
   /// Event manager for handling player events
   final FastPixPlayerEventManager _eventManager = FastPixPlayerEventManager();
@@ -121,7 +149,120 @@ class FastPixPlayerController implements PlayerObserver {
     _eventManager,
     hasPreparedSource: () => _betterPlayerController != null,
     onWindowTransport: _handleWindowTransport,
+    // A window dismissed while the app stays in the background is a way of
+    // leaving the app, so it gets the same pause rule.
+    onWindowDismissed: () => _lifecycleManager.onPipDismissed(),
+    // Native asked for a window on leaving and none opened: the pause rule it
+    // held off is owed.
+    onAutoPipRefused: () => _lifecycleManager.onAutoPipRefused(),
+    // iOS: a locked screen hides the window, so its video gets the rule any
+    // off-screen video gets, as Android's stop in the window does.
+    onWindowScreenLock: (locked) =>
+        _lifecycleManager.onPipWindowScreenLock(locked),
+    // iOS kept refusing to play and native stopped the engine's retries. The
+    // video is not playing, so the controller says so; the viewer's next play
+    // tries again.
+    onPlaybackRefused: () {
+      if (_disposed) return;
+      unawaited(pause());
+    },
   );
+
+  /// Substrings that mark an error as the device having no network, rather
+  /// than anything about this stream.
+  static const List<String> _offlineMarkers = [
+    'internet connection appears to be offline',
+    'failed host lookup',
+    'nodename nor servname',
+    'socketexception',
+    'network connection was lost',
+    'unable to resolve host',
+    'no address associated',
+  ];
+
+  static bool _looksOffline(String? rawError) {
+    if (rawError == null) return false;
+    final text = rawError.toLowerCase();
+    return _offlineMarkers.any(text.contains);
+  }
+
+  /// ExoPlayer's text for every load failure, offline included: the cause
+  /// (`UnknownHostException`, a refused connection) stays native, so none of
+  /// [_offlineMarkers] ever matches on Android and the retry never armed.
+  static bool _isOpaqueSourceError(String? rawError) =>
+      rawError != null && rawError.toLowerCase().contains('source error');
+
+  /// Arm the offline retry for an error that does not say why it failed, when
+  /// the device has no network at the moment it is reported.
+  ///
+  /// The network is what tells an offline failure from a missing playback ID
+  /// or a rejected token, which ExoPlayer reports with the same text: those
+  /// would fail again on reload, so they are left alone.
+  Future<void> _armOfflineRetryIfOffline() async {
+    final source = _dataSource;
+    await FastPixNetworkMonitor.instance.start();
+    if (_disposed || !identical(_dataSource, source)) return;
+    if (FastPixNetworkMonitor.instance.current == FastPixNetworkType.none) {
+      _armOfflineRetry();
+    }
+  }
+
+  /// The source whose playback failed because the device had no network, held
+  /// until the network comes back.
+  String? _offlineFailureFor;
+  StreamSubscription<FastPixNetworkType>? _networkRetry;
+
+  /// Wait for the network, then load [_dataSource] again.
+  ///
+  /// A platform player that failed offline never recovers on its own: an
+  /// `AVPlayerItem` that has failed is failed for good, and ExoPlayer's is the
+  /// same, so the video sat stuck even once the WiFi was back — the viewer had
+  /// to load a different source and come back to it, which built a new player
+  /// and was the only reason it ever played again. A fresh load is the only
+  /// cure, so it is done for them.
+  ///
+  /// The listener is started only here, so an app whose playback never fails
+  /// offline never starts a connectivity listener at all.
+  void _armOfflineRetry() {
+    final source = _dataSource;
+    if (source == null || _disposed) return;
+    _offlineFailureFor = source.playbackId;
+    unawaited(FastPixNetworkMonitor.instance.start());
+    _networkRetry ??=
+        FastPixNetworkMonitor.instance.changes.listen(_handleNetworkChange);
+  }
+
+  void _handleNetworkChange(FastPixNetworkType type) {
+    if (_disposed) return;
+    // `unknown` is "not established yet", not "connected".
+    if (type == FastPixNetworkType.none ||
+        type == FastPixNetworkType.unknown) {
+      return;
+    }
+    final playbackId = _offlineFailureFor;
+    if (playbackId == null) return;
+    final source = _dataSource;
+    // Cleared either way: a source that has since been replaced has a player
+    // of its own and is not this failure's business any more.
+    _offlineFailureFor = null;
+    if (source == null || source.playbackId != playbackId) return;
+
+    // Resumed where it stopped when it got anywhere at all, so a video that
+    // failed an hour in does not restart from the beginning.
+    final position = getCurrentPosition() ?? Duration.zero;
+    final resume = position > Duration.zero ? source.copyWith(startAt: position)
+                                            : source;
+    debugPrint('FastPix: the network is back — reloading $playbackId'
+        '${position > Duration.zero ? ' from $position' : ''}');
+    // A retry that throws must say so: it runs unattended, so a swallowed
+    // failure would look exactly like a video that simply never came back.
+    unawaited(
+      loadPlaybackId(resume).catchError((Object error) {
+        debugPrint('FastPix: reloading $playbackId after the network '
+            'returned failed: $error');
+      }),
+    );
+  }
 
   /// The viewer played or paused from inside the Picture-in-Picture window.
   ///
@@ -132,6 +273,7 @@ class FastPixPlayerController implements PlayerObserver {
   /// them came from a branch keyed on its PiP controller, which this SDK no
   /// longer builds.
   void _handleWindowTransport(bool playing) {
+    debugPrint('DIAG window transport playing=$playing engine=$isPlaying'); // TEMP-DIAG
     if (_disposed) return;
     _handleTransportEvent(playing ? PlayerEvent.play : PlayerEvent.pause);
     _emitPlaybackState();
@@ -142,15 +284,52 @@ class FastPixPlayerController implements PlayerObserver {
   /// Foreground/background pausing, owned here rather than by the engine so
   /// that a PiP window — which is what the viewer left the app to watch — is
   /// not paused by the very act of leaving.
-  late final FastPixLifecycleManager _lifecycleManager = FastPixLifecycleManager(
-    () => _betterPlayerController,
-    // Pending, not just active: the pause rule runs on the way out of the
-    // app, which is exactly when a PiP window is still opening.
-    () => _pipManager.isPipActiveOrPending,
-    wantsAutoPip: () => _pipManager.enabled && _pipManager.autoEnterOnBackground,
-    enterPip: () => _pipManager.enterPip(),
-    reconcilePip: () => _pipManager.reconcileWithPlatform(),
-  );
+  late final FastPixLifecycleManager _lifecycleManager =
+      FastPixLifecycleManager(
+        () => _betterPlayerController,
+        // Pending, not just active: the pause rule runs on the way out of the
+        // app, which is exactly when a PiP window is still opening.
+        () => _pipManager.isPipActiveOrPending,
+        pipWindowOpen: () => _pipManager.isPipActive,
+        wantsAutoPip:
+            () => _pipManager.enabled && _pipManager.autoEnterOnBackground,
+        enterPip: () => _pipManager.enterPip(),
+        markPipPending: () => _pipManager.markAutoPipPending(),
+        reconcilePip: () => _pipManager.reconcileWithPlatform(),
+        // Warm players are optional by contract, and each holds a decoder and
+        // its buffers for a video that may never play — the first thing to
+        // hand back before the OS starts killing processes.
+        onMemoryPressure: () {
+          // First, so the warm player it holds is not left to the window.
+          FastPixPrerenderManager.instance.releaseFor(
+            _prerenderOwner,
+            'memoryPressure',
+          );
+          FastPixPreloadManager.instance.clearAll();
+        },
+        onBackgrounded: () {
+          // Not configurable. The warm player stays, so a background
+          // auto-advance still starts warm.
+          FastPixPrerenderManager.instance.releaseFor(
+            _prerenderOwner,
+            'backgrounded',
+            keepWarm: true,
+          );
+          // Status and lock screen reflect a pause the rule just made.
+          _emitPlaybackState();
+        },
+        onForegrounded: () {
+          // Prerendering is decided again from where the playlist is now.
+          _autoPrerenderAskedFor = null;
+          _maybeAutoPrerender();
+          // The close that preceded this released every warm player as
+          // memory pressure (Android reports any app close as one), and
+          // nothing declared the window again until the next load finished.
+          _declareWarmWindow();
+          // Back on screen: controls withdrawn on the way out return.
+          _publishNowPlaying();
+        },
+      );
 
   /// The [GlobalKey] of the on-screen video surface, used to anchor a PiP
   /// window (required on iOS). Registered by [FastPixVideoSurface] while it is
@@ -200,7 +379,12 @@ class FastPixPlayerController implements PlayerObserver {
   }
 
   /// Seek forward by [offset] (default 10s), clamped to the media duration.
+  ///
+  /// Ignored while [isScrubbing]: the drag owns the position until release,
+  /// and [endScrub] would overwrite this seek anyway — after the engine had
+  /// already paused, fetched and resumed for a jump the viewer never saw.
   Future<void> seekForward([Duration offset = const Duration(seconds: 10)]) {
+    if (isScrubbing) return Future<void>.value();
     final duration = getTotalDuration() ?? Duration.zero;
     var target = (getCurrentPosition() ?? Duration.zero) + offset;
     if (duration > Duration.zero && target > duration) target = duration;
@@ -209,7 +393,10 @@ class FastPixPlayerController implements PlayerObserver {
   }
 
   /// Seek backward by [offset] (default 10s), clamped to the start.
+  ///
+  /// Ignored while [isScrubbing], as [seekForward].
   Future<void> seekBackward([Duration offset = const Duration(seconds: 10)]) {
+    if (isScrubbing) return Future<void>.value();
     var target = (getCurrentPosition() ?? Duration.zero) - offset;
     if (target < Duration.zero) target = Duration.zero;
     return seekTo(target);
@@ -271,6 +458,15 @@ class FastPixPlayerController implements PlayerObserver {
   void _emitFullscreen(bool isFullscreen) {
     if (_lastFullscreenEmitted == isFullscreen) return;
     _lastFullscreenEmitted = isFullscreen;
+    // The fullscreen route holds only the active player, so the hidden slot
+    // goes; its warm player stays adoptable.
+    if (isFullscreen) {
+      FastPixPrerenderManager.instance.releaseFor(
+        _prerenderOwner,
+        'policyChanged',
+        keepWarm: true,
+      );
+    }
     _eventManager.emit(
       FastPixPlayerFullscreenChangedEvent(
         timestamp: DateTime.now(),
@@ -318,6 +514,86 @@ class FastPixPlayerController implements PlayerObserver {
   Future<void> endScrub(Duration position) async {
     await _scrubController.endScrub(position);
     _emitPlaybackState();
+  }
+
+  /// Abandon an in-progress scrub without seeking, so [playbackStateStream]
+  /// reports the live playhead again. A no-op when no scrub is in progress.
+  ///
+  /// Call it when a seekbar is disposed mid-drag: a slider removed while the
+  /// finger is down (fullscreen or PiP rebuilding the controls) gets neither
+  /// its drag-end nor its drag-cancel callback, so [endScrub] never runs.
+  void cancelScrub() {
+    if (_scrubController.cancelScrub()) _emitPlaybackState();
+  }
+
+  // ---- Seek preview spritesheets ----
+
+  /// Loads the active source's spritesheet after the source is ready, and
+  /// releases it when the source changes. Failures are reported as
+  /// [FastPixSpritesheetFailedEvent] only, never on the error channel.
+  late final FastPixSpritesheetManager _spritesheetManager =
+      FastPixSpritesheetManager(_eventManager);
+
+  /// The active source's spritesheet, or null while none is loaded.
+  FastPixSpritesheet? get spritesheet => _spritesheetManager.spritesheet;
+
+  /// Emits the spritesheet when its metadata loads, again when its image is
+  /// ready to draw, and null when a source change clears it.
+  Stream<FastPixSpritesheet?> get spritesheetStream =>
+      _spritesheetManager.changes;
+
+  /// Where the active source's spritesheet metadata is in its lifecycle.
+  FastPixSpritesheetStatus get spritesheetStatus => _spritesheetManager.status;
+
+  /// The spritesheet tile covering [position], or null while none is loaded.
+  FastPixSpritesheetTile? spritesheetTileAt(Duration position) =>
+      _spritesheetManager.spritesheet?.tileAt(position);
+
+  /// Replace the spritesheet settings, for the current source and every later
+  /// one — a playlist advance included.
+  ///
+  /// When a source is ready its spritesheet is dropped and loaded again under
+  /// the new settings, so a switch between normal and advanced, or a new
+  /// interval, shows on the next scrub without reloading the video. Calling it
+  /// again with the same settings still reloads, which is how an advanced
+  /// sheet that outlasted the generation retries is asked for once more.
+  ///
+  /// The settings hold until [initialize] or [setPlaylist] is given a
+  /// configuration of its own, which replaces them. Playback is untouched:
+  /// spritesheet settings never reach the engine, so a preloaded player stays
+  /// adoptable.
+  void setSpritesheetConfiguration(
+    FastPixPlayerSpritesheetConfiguration spritesheetConfiguration,
+  ) {
+    if (_disposed) return;
+    _spritesheetOverride = spritesheetConfiguration;
+
+    // A load still in flight applies the override when it reaches ready.
+    final dataSource = _dataSource;
+    if (_currentState != FastPixPlayerState.ready || dataSource == null) return;
+    _spritesheetManager.resetForNewSource();
+    unawaited(
+      _spritesheetManager.load(
+        dataSource,
+        _withSpritesheetOverride(_configuration),
+      ),
+    );
+  }
+
+  /// Settings from [setSpritesheetConfiguration], or null when none are set.
+  ///
+  /// Kept apart from `_configuration` rather than written into it: every load
+  /// replaces `_configuration` with the configuration it was handed — a
+  /// playlist advance hands over the one captured when the playlist was set —
+  /// so a change written there would be undone by the next item.
+  FastPixPlayerSpritesheetConfiguration? _spritesheetOverride;
+
+  FastPixPlayerConfiguration? _withSpritesheetOverride(
+    FastPixPlayerConfiguration? configuration,
+  ) {
+    final override = _spritesheetOverride;
+    if (configuration == null || override == null) return configuration;
+    return configuration.copyWith(spritesheetConfiguration: override);
   }
 
   // ---- Feature 4: Track selection ----
@@ -377,7 +653,45 @@ class FastPixPlayerController implements PlayerObserver {
   /// existing handoff (`startCastingFrom`/`stopCastingTo`) can drive it from
   /// application-owned UI.
   void attachCastController(FastPixCastController controller) {
+    _cast?.removeEventListener(
+      FastPixPlayerEventTypes.castStarted,
+      _reevaluatePrerenderPolicy,
+    );
     _cast = controller;
+    controller.addEventListener(
+      FastPixPlayerEventTypes.castStarted,
+      _reevaluatePrerenderPolicy,
+    );
+  }
+
+  /// A PiP or Cast start can end a prerender's policy. Read on the
+  /// next microtask: the start is announced before its state is recorded.
+  void _reevaluatePrerenderPolicy(FastPixPlayerEvent _) => scheduleMicrotask(() {
+    if (_disposed) return;
+    FastPixPrerenderManager.instance.reevaluatePolicy();
+    if (!_pipManager.isPipActiveOrPending) _retryAutoPrerender();
+  });
+
+  /// Ask again for a prerender that an earlier attempt gave up on.
+  ///
+  /// [_maybeAutoPrerender] asks once per item, and an attempt declined while
+  /// a PiP window was open or closing — the one made the moment the app
+  /// returns from the window, before its close is recorded — or released when
+  /// the window opened, ended that item's prerender for good. Next then
+  /// started cold behind a loader.
+  void _retryAutoPrerender() {
+    final asked = _autoPrerenderAskedFor;
+    if (asked == null) return;
+    final status = FastPixPrerenderManager.instance.statusOf(
+      _prerenderOwner,
+      asked,
+    );
+    if (status == FastPixPrerenderStatus.preparing ||
+        status == FastPixPrerenderStatus.frameReady) {
+      return;
+    }
+    _autoPrerenderAskedFor = null;
+    _maybeAutoPrerender();
   }
 
   /// Whether a cast session is active.
@@ -417,7 +731,7 @@ class FastPixPlayerController implements PlayerObserver {
   /// Use `controller.pip.enterPip()` / `togglePip()` / `exitPip()`, and
   /// `controller.pip.isPipActive` / `isPipAvailable()`. PiP needs a
   /// [FastPixVideoSurface] mounted to anchor to on iOS, and app-side platform
-  /// config (Android `supportsPictureInPicture`; iOS background-audio mode).
+  /// config (Android `supportsPictureInPicture`; iOS `audio` background mode).
   FastPixPipManager get pip => _pipManager;
 
   // ---- Custom-UI internals ----
@@ -446,8 +760,79 @@ class FastPixPlayerController implements PlayerObserver {
   }
 
   void _emitPlaybackState() {
+    // Every play and pause passes through here, so native always knows in
+    // advance whether leaving should open a PiP window.
+    if (!_disposed) _pipManager.updatePlaying(isPlaying);
     if (_playbackStateController.isClosed) return;
     _playbackStateController.add(_buildPlaybackState());
+    _publishNowPlaying();
+  }
+
+  /// Publishes the source as iOS's Now Playing media and answers the lock
+  /// screen and Control Center's remote commands.
+  late final FastPixNowPlayingManager _nowPlayingManager =
+      FastPixNowPlayingManager(onCommand: _handleRemoteCommand);
+
+  /// Keep Now Playing describing the source, from the same snapshots the
+  /// playback-state stream carries; the manager sends only real changes.
+  void _publishNowPlaying() {
+    if (_disposed || _betterPlayerController == null) return;
+    final enabled =
+        (_playlistConfiguration ?? _configuration)?.enableNowPlaying ?? true;
+    // While casting, the Cast library describes the session itself.
+    if (!enabled || (_cast?.state.isCasting ?? false)) {
+      _nowPlayingManager.clear();
+      return;
+    }
+    final source = currentPlaylistItem ?? dataSource;
+    _nowPlayingManager.publish(
+      FastPixNowPlayingInfo(
+        title: source?.title,
+        duration: getTotalDuration() ?? Duration.zero,
+        position: getCurrentPosition() ?? Duration.zero,
+        playing: isPlaying,
+        rate: _rateManager.rate,
+        isLive: source?.streamType == StreamType.live,
+      ),
+    );
+  }
+
+  /// A play, pause or seek from the lock screen or Control Center, taken
+  /// through the same methods as a tap in the app so events and analytics
+  /// cannot tell the two apart.
+  void _handleRemoteCommand(FastPixRemoteCommand command, Duration? position) {
+    if (_disposed || _betterPlayerController == null) return;
+    final source = currentPlaylistItem ?? dataSource;
+    final isLive = source?.streamType == StreamType.live;
+    // Live has no seek bar, and a stale one must not move the edge.
+    if (command == FastPixRemoteCommand.seek && (isLive || position == null)) {
+      return;
+    }
+    // The viewer's choice stands over a pause the lifecycle rule made.
+    if (command != FastPixRemoteCommand.seek) {
+      _lifecycleManager.viewerTookOver();
+    }
+    switch (command) {
+      case FastPixRemoteCommand.play:
+        unawaited(play());
+      case FastPixRemoteCommand.pause:
+        unawaited(pause());
+      case FastPixRemoteCommand.toggle:
+        unawaited(togglePlayPause());
+      case FastPixRemoteCommand.seek:
+        unawaited(seekTo(_clampToDuration(position!)));
+    }
+  }
+
+  /// [target] held inside `0...duration`; unclamped above while the duration
+  /// is unknown.
+  Duration _clampToDuration(Duration target) {
+    if (target < Duration.zero) return Duration.zero;
+    final duration = getTotalDuration();
+    if (duration != null && duration > Duration.zero && target > duration) {
+      return duration;
+    }
+    return target;
   }
 
   /// Emit the *Ready events once, the first tick after the engine has parsed
@@ -609,6 +994,9 @@ class FastPixPlayerController implements PlayerObserver {
       if (_disposed) return;
     }
 
+    if (configuration != null) {
+      _spritesheetOverride = null;
+    }
     _playlistConfiguration =
         configuration ?? _playlistConfiguration ?? _configuration;
 
@@ -625,6 +1013,7 @@ class FastPixPlayerController implements PlayerObserver {
 
     if (keptIndex >= 0) {
       _publishPlaylistState();
+      _reconcilePrerenderTarget();
       _declareWarmWindow();
       return;
     }
@@ -666,6 +1055,7 @@ class FastPixPlayerController implements PlayerObserver {
     _playlist.clear();
     _emitPlaylistChanged();
     _publishPlaylistState();
+    _reconcilePrerenderTarget();
   }
 
   /// Move to the next item, reporting whether the position moved.
@@ -917,22 +1307,24 @@ class FastPixPlayerController implements PlayerObserver {
     );
   }
 
-  /// Decide what a finished item leads to.
+  /// Decide what a finished item leads to, and say whether playback goes on.
   ///
   /// Ordered by precedence: repeat-one replays whatever the other settings
   /// say; a live Cast session suppresses local advance, since the local player
   /// is not the surface the viewer is watching; autoplay-next advances; and
   /// repeat-all wraps only because it is a rule about automatic advancing.
-  void _handlePlaylistCompletion() {
-    if (_disposed) return;
+  ///
+  /// Returns false when nothing follows.
+  bool _handlePlaylistCompletion() {
+    if (_disposed) return false;
 
     if (repeatMode == FastPixPlaylistRepeatMode.one) {
       unawaited(_repeatCurrentItem());
-      return;
+      return true;
     }
-    if (!hasPlaylist || _playlist.currentIndex < 0) return;
-    if (isCasting) return;
-    if (!autoPlayNext) return;
+    if (!hasPlaylist || _playlist.currentIndex < 0) return false;
+    if (isCasting) return false;
+    if (!autoPlayNext) return false;
 
     if (_playlist.canGoNext) {
       unawaited(
@@ -941,11 +1333,11 @@ class FastPixPlayerController implements PlayerObserver {
           FastPixPlaylistItemChangeReason.autoAdvance,
         ),
       );
-      return;
+      return true;
     }
     if (repeatMode == FastPixPlaylistRepeatMode.all) {
       unawaited(_loadItem(0, FastPixPlaylistItemChangeReason.repeat));
-      return;
+      return true;
     }
     _eventManager.emit(
       FastPixPlaylistEndedEvent(
@@ -953,6 +1345,7 @@ class FastPixPlayerController implements PlayerObserver {
         count: _playlist.count,
       ),
     );
+    return false;
   }
 
   /// Replay the active item from its start.
@@ -1080,6 +1473,10 @@ class FastPixPlayerController implements PlayerObserver {
     // nothing will ever release, and start accepting events again, while
     // looking entirely correct from the outside.
     _disposed = false;
+    // An explicit configuration is newer intent than an earlier override.
+    if (configuration != null) {
+      _spritesheetOverride = null;
+    }
     await _loadSource(
       dataSource,
       configuration: configuration,
@@ -1136,6 +1533,7 @@ class FastPixPlayerController implements PlayerObserver {
         dataSource,
         configuration: configuration,
         adoptPreloaded: adoptPreloaded,
+        request: request,
       );
     }();
 
@@ -1143,31 +1541,477 @@ class FastPixPlayerController implements PlayerObserver {
     return load;
   }
 
+  // --- Prerendering --------------------------------------------------------
+
+  /// What [FastPixPrerenderManager] reads from this controller.
+  late final _ControllerPrerenderOwner _prerenderOwner =
+      _ControllerPrerenderOwner(this);
+
+  final ValueNotifier<BetterPlayerController?> _prerenderEngine =
+      ValueNotifier<BetterPlayerController?>(null);
+
+  /// How many surfaces able to host a hidden slot are mounted for this
+  /// controller.
+  int _prerenderSurfaces = 0;
+
+  /// The navigation target already asked about for the active item, so the
+  /// progress tick asks once rather than on every tick.
+  String? _autoPrerenderAskedFor;
+
+  /// The longest the outgoing player stays on screen waiting for a warm
+  /// player's first frame.
+  static const Duration _warmHandOffCap = Duration(seconds: 2);
+
+  FastPixPlayerPrerenderConfiguration get _prerenderConfiguration =>
+      (_playlistConfiguration ?? _configuration)?.prerenderConfiguration ??
+      const FastPixPlayerPrerenderConfiguration();
+
+  /// The engine player mounted in this controller's hidden slot, or null.
+  ///
+  /// The SDK's surfaces build the hidden slot from it.
+  @visibleForTesting
+  ValueListenable<BetterPlayerController?> get prerenderEngine =>
+      _prerenderEngine;
+
+  /// Called by [FastPixVideoSurface] and [FastPixPlayer] when they mount, so
+  /// a prerender has a surface to be hidden on.
+  void attachPrerenderSurface() => _prerenderSurfaces++;
+
+  /// Called by [FastPixVideoSurface] and [FastPixPlayer] when they unmount.
+  /// The last one going ends a prerender's surface.
+  void detachPrerenderSurface() {
+    if (_prerenderSurfaces > 0) _prerenderSurfaces--;
+    if (_prerenderSurfaces == 0) {
+      FastPixPrerenderManager.instance.surfaceUnavailable(_prerenderOwner);
+    }
+  }
+
+  /// Prerender [source]: warm it, mount it hidden beneath the active video,
+  /// position it at its start and wait until a frame is ready, so loading it
+  /// later swaps straight to that frame.
+  ///
+  /// Completes when the request settles. A refusal is a skip with a reason,
+  /// never an error, and a source already warmed is reused.
+  Future<FastPixPrerenderResult> prerender(FastPixPlayerDataSource source) =>
+      FastPixPrerenderManager.instance.request(_prerenderOwner, source);
+
+  /// Cancel the prerender of [playbackId]. Nothing happens when there is none.
+  void cancelPrerender(String playbackId) =>
+      FastPixPrerenderManager.instance.cancel(_prerenderOwner, playbackId);
+
+  /// The prerender status of [playbackId]; idle when it was never requested.
+  FastPixPrerenderStatus prerenderStatusOf(String playbackId) =>
+      FastPixPrerenderManager.instance.statusOf(_prerenderOwner, playbackId);
+
+  /// Change the prerender settings for the source playing now and the rest of
+  /// its playlist, without reloading anything.
+  ///
+  /// Prerender settings never reach the engine, so the active player and the
+  /// warm players are left as they are. Applied at once: a prerender the new
+  /// settings rule out is released, and one they now allow is made. A later
+  /// [setPlaylist] or [initialize] with its own configuration replaces them.
+  void updatePrerenderConfiguration(
+    FastPixPlayerPrerenderConfiguration configuration,
+  ) {
+    if (_disposed) return;
+    _configuration = _configuration?.copyWith(
+      prerenderConfiguration: configuration,
+    );
+    _playlistConfiguration = _playlistConfiguration?.copyWith(
+      prerenderConfiguration: configuration,
+    );
+    FastPixPrerenderManager.instance.reevaluatePolicy();
+    _retryAutoPrerender();
+    _maybeAutoPrerender();
+  }
+
+  /// The configuration a load with [configuration] ends up playing with —
+  /// what [_recycleMetricsSession] installs — fingerprinted for [dataSource].
+  String _fingerprintFor(
+    FastPixPlayerDataSource dataSource,
+    FastPixPlayerConfiguration? configuration,
+  ) => betterPlayerConfigurationFingerprint(
+    configuration: configuration ?? FastPixPlayerConfiguration('', '', ''),
+    dataSource: dataSource,
+  );
+
+  /// Take this controller's prerender for the load of [dataSource], or
+  /// release it when it cannot be used.
+  FastPixPrerenderClaim? _claimPrerender(
+    FastPixPlayerDataSource dataSource,
+    FastPixPlayerConfiguration? configuration, {
+    required bool adoptPreloaded,
+  }) {
+    final manager = FastPixPrerenderManager.instance;
+    final live = manager.livePlaybackIdOf(_prerenderOwner);
+    if (live == null) return null;
+    if (live != dataSource.playbackId) {
+      manager.releaseFor(_prerenderOwner, 'replaced');
+      return null;
+    }
+    final settings =
+        (configuration ?? _playlistConfiguration ?? _configuration)
+            ?.prerenderConfiguration ??
+        const FastPixPlayerPrerenderConfiguration();
+    if (!settings.enablePrerender) {
+      manager.releaseFor(
+        _prerenderOwner,
+        'policyChanged',
+      );
+      return null;
+    }
+    if (!adoptPreloaded) {
+      manager.releaseFor(_prerenderOwner, 'replaced');
+      return null;
+    }
+    // The engine's fullscreen route holds only the active player; the warm
+    // player stays adoptable on the normal path.
+    if (isFullscreen || _betterPlayerController == null) {
+      manager.releaseFor(
+        _prerenderOwner,
+        'policyChanged',
+        keepWarm: true,
+      );
+      return null;
+    }
+    return manager.tryClaim(
+      _prerenderOwner,
+      dataSource.playbackId,
+      fingerprint: _fingerprintFor(dataSource, configuration),
+    );
+  }
+
+  /// Whether a warm player for [dataSource] could take over with the
+  /// outgoing player kept on screen. DRM keeps today's order: two secure
+  /// decoders at once break Widevine L1.
+  bool _mayHandOffWarm(FastPixPlayerDataSource dataSource, bool adoptPreloaded) {
+    if (!adoptPreloaded || dataSource.drmEnabled) return false;
+    if (!_prerenderConfiguration.enablePrerender) return false;
+    if (_betterPlayerController == null || isFullscreen) return false;
+    if (_prerenderSurfaces == 0) return false;
+    if (_pipManager.isPipActiveOrPending) return false;
+    if (isCasting) return false;
+    return FastPixPreloadManager.instance.isReady(dataSource.playbackId);
+  }
+
+  /// Make [claim]'s player the active one with the outgoing player kept on
+  /// screen until the incoming one's frame is.
+  ///
+  /// `done` is false when the load must continue on the normal path, adopting
+  /// `adopt` if set: a warm player whose frame did not arrive in time.
+  Future<({bool done, BetterPlayerController? adopt})> _handOff(
+    FastPixPrerenderClaim claim,
+    FastPixPlayerDataSource dataSource,
+    FastPixPlayerConfiguration? configuration,
+    int? request,
+  ) async {
+    final manager = FastPixPrerenderManager.instance;
+    final outgoing = _betterPlayerController;
+    final incoming = claim.engine;
+    final volume = outgoing?.videoPlayerController?.value.volume ?? 1.0;
+
+    // Silent at once, and deaf: its pause must not read as the viewer's.
+    if (outgoing != null) {
+      outgoing.removeEventsListener(_onPlayerEvent);
+      unawaited(outgoing.pause());
+      unawaited(outgoing.setVolume(0));
+    }
+
+    if (claim.kind == FastPixPrerenderClaimKind.warm) {
+      final settled = await _awaitWarmFrame(claim, outgoing, request);
+      if (settled != null) return settled;
+    }
+
+    final clock = Stopwatch()..start();
+    if (outgoing != null) fastPixFullscreenOverlays[outgoing] = null;
+    _resetForNewSource();
+    _emitPlaybackState();
+    _skipManager.setSegments(dataSource.skipSegments);
+    // The metrics view for this source opens here, at promotion, and only
+    // here: a prerender that is never promoted is never a view.
+    await _recycleMetricsSession(dataSource, configuration);
+    if (_disposed) {
+      manager.abandonClaim(claim, 'disposed');
+      outgoing?.dispose(forceDispose: true);
+      return (done: true, adopt: null);
+    }
+
+    final betterPlayerConfiguration = _createBetterPlayerConfiguration();
+    _startedFromWarmPlayer = true;
+    // The outgoing frame stays until the incoming one replaces it.
+    _betterPlayerController = incoming;
+    unawaited(incoming.setLooping(dataSource.loop));
+    await incoming.setVolume(volume);
+    await _rateManager.setRate(_rateManager.rate);
+
+    await _activateEngine(
+      dataSource,
+      incoming,
+      onSwap: () {
+        // One rebuild: the incoming player's view moves up to the active slot
+        // and the outgoing one goes under the cover until it is released.
+        _prerenderEngine.value = outgoing;
+        unawaited(manager.setRole(incoming, FastPixPrerenderRole.active));
+        if (outgoing != null) {
+          unawaited(manager.setRole(outgoing, FastPixPrerenderRole.prerender));
+        }
+      },
+    );
+    if (betterPlayerConfiguration.autoPlay && !_disposed) {
+      unawaited(incoming.play());
+    }
+
+    // The swap frame has been presented before the outgoing player goes.
+    await manager.afterFrames();
+    clock.stop();
+    manager.completeClaim(claim, startupGap: clock.elapsed);
+    if (identical(_prerenderEngine.value, outgoing)) {
+      _prerenderEngine.value = null;
+    }
+    outgoing?.dispose(forceDispose: true);
+    // The outgoing player's release can wipe the lock screen.
+    _publishNowPlaying();
+    return (done: true, adopt: null);
+  }
+
+  /// This controller's prerender for [dataSource], or else a warm player that
+  /// can be handed over. A Future only when a warm claim is attempted.
+  FutureOr<FastPixPrerenderClaim?> _claimFor(
+    FastPixPlayerDataSource dataSource,
+    FastPixPlayerConfiguration? configuration, {
+    required bool adoptPreloaded,
+  }) {
+    final claim = _claimPrerender(
+      dataSource,
+      configuration,
+      adoptPreloaded: adoptPreloaded,
+    );
+    if (claim != null || !_mayHandOffWarm(dataSource, adoptPreloaded)) {
+      return claim;
+    }
+    return FastPixPrerenderManager.instance.claimWarm(
+      _prerenderOwner,
+      dataSource,
+      fingerprint: _fingerprintFor(dataSource, configuration),
+    );
+  }
+
+  /// Hand [dataSource]'s load to [claim]'s player, or abandon the claim when
+  /// this controller was disposed while it was being taken.
+  Future<({bool done, BetterPlayerController? adopt})> _settleClaim(
+    FastPixPrerenderClaim claim,
+    FastPixPlayerDataSource dataSource,
+    FastPixPlayerConfiguration? configuration,
+    int? request,
+  ) async {
+    if (_disposed) {
+      FastPixPrerenderManager.instance.abandonClaim(
+        claim,
+        'disposed',
+      );
+      return (done: true, adopt: null);
+    }
+    return _handOff(claim, dataSource, configuration, request);
+  }
+
+  /// Wait, capped, for a warm [claim]'s first frame. Null when it arrived and
+  /// the swap goes ahead; otherwise the hand-off's result.
+  Future<({bool done, BetterPlayerController? adopt})?> _awaitWarmFrame(
+    FastPixPrerenderClaim claim,
+    BetterPlayerController? outgoing,
+    int? request,
+  ) async {
+    final manager = FastPixPrerenderManager.instance;
+    final incoming = claim.engine;
+    final ready = await claim.frame.timeout(
+      _warmHandOffCap,
+      onTimeout: () => false,
+    );
+    if (_disposed) {
+      manager.abandonClaim(claim, 'disposed');
+      return (done: true, adopt: null);
+    }
+    if (request != null && request != _loadRequestId) {
+      // A newer load is queued behind this one and starts from the outgoing
+      // player, which it releases.
+      manager.abandonClaim(claim, 'replaced');
+      return (done: true, adopt: null);
+    }
+    if (ready) return null;
+    // Today's order: the outgoing player goes, the loading state shows, and
+    // this warm player is adopted as any other would be.
+    _prerenderEngine.value = null;
+    manager.completeClaim(claim);
+    // Forgotten, not announced: it is mounted afresh on the normal path.
+    unawaited(manager.setRole(incoming, FastPixPrerenderRole.released));
+    unawaited(incoming.setVolume(1));
+    // Listening again, so the normal path's release is the usual one.
+    outgoing?.addEventsListener(_onPlayerEvent);
+    return (done: false, adopt: incoming);
+  }
+
+  /// Where a prerender should be made from the active item, and the reason
+  /// there is none when the playlist rules one out.
+  ({FastPixPlayerDataSource? target, FastPixPrerenderErrorCode? skip})
+  _navigationTarget() {
+    final index = _playlist.currentIndex;
+    final count = _playlist.count;
+    if (count <= 1 || index < 0) return (target: null, skip: null);
+    if (repeatMode == FastPixPlaylistRepeatMode.one) {
+      final candidate = _playlistItemAt(_forwardIndex(index, count));
+      final skip =
+          candidate == null ? null : FastPixPrerenderErrorCode.navigationPolicy;
+      return (target: candidate, skip: skip);
+    }
+    final target = _playlistItemAt(_forwardIndex(index, count));
+    if (target == null) return (target: null, skip: null);
+    if (_dataSource?.streamType == StreamType.live) {
+      return (target: target, skip: FastPixPrerenderErrorCode.live);
+    }
+    return (target: target, skip: null);
+  }
+
+  /// The item after [index] of [count], wrapping to the first only with
+  /// repeat-all; null past the end.
+  int? _forwardIndex(int index, int count) {
+    if (index + 1 < count) return index + 1;
+    return repeatMode == FastPixPlaylistRepeatMode.all ? 0 : null;
+  }
+
+  /// The playlist item at [index], or null when there is no index.
+  FastPixPlayerDataSource? _playlistItemAt(int? index) =>
+      index == null ? null : _playlist.itemAt(index);
+
+  /// Prerender the navigation target once the active item has shown its
+  /// first frame, so the next move finds it ready however early it comes.
+  void _maybeAutoPrerender() {
+    if (_disposed || !_firstFrameReported) return;
+    final settings = _prerenderConfiguration;
+    if (!settings.enablePrerender) return;
+    if (!hasPlaylist) return;
+    final manager = FastPixPrerenderManager.instance;
+    final (:target, :skip) = _navigationTarget();
+    if (target == null) return;
+    final playbackId = target.playbackId;
+    if (_autoPrerenderAskedFor == playbackId) return;
+    if (skip != null) {
+      _autoPrerenderAskedFor = playbackId;
+      manager.skip(_prerenderOwner, target, skip);
+      return;
+    }
+    _autoPrerenderAskedFor = playbackId;
+    unawaited(manager.request(_prerenderOwner, target, automatic: true));
+  }
+
+  /// The playlist changed: a prerender that is no longer the navigation
+  /// target goes.
+  void _reconcilePrerenderTarget() {
+    final manager = FastPixPrerenderManager.instance;
+    // A new configuration may have switched prerendering off.
+    manager.reevaluatePolicy();
+    final live = manager.livePlaybackIdOf(_prerenderOwner);
+    if (live == null) return;
+    final (:target, :skip) = _navigationTarget();
+    if (skip == null && target?.playbackId == live) return;
+    manager.releaseFor(_prerenderOwner, 'replaced');
+  }
+
+  /// Throws, after emitting it as an error event, when [dataSource] has an
+  /// unusable DRM setup. Does nothing for a clear source.
+  void _validateDrm(FastPixPlayerDataSource dataSource) {
+    if (!dataSource.drmEnabled) return;
+    try {
+      dataSource.drmConfiguration!.validate(
+        playbackId: dataSource.playbackId,
+        hasPlaybackToken: dataSource.token?.isNotEmpty == true,
+      );
+    } on FastPixDrmException catch (exception) {
+      _handleDrmException(exception);
+      rethrow;
+    }
+  }
+
+  /// The warmed player for [dataSource], if one matches the current
+  /// configuration. Taking it removes it from the preload window.
+  BetterPlayerController? _consumePreloaded(
+    FastPixPlayerDataSource dataSource,
+  ) {
+    return FastPixPreloadManager.instance.consume(
+      dataSource.playbackId,
+      fingerprint: betterPlayerConfigurationFingerprint(
+        configuration: _configuration,
+        dataSource: dataSource,
+      ),
+    );
+  }
+
+  /// Records whether this load acquires a DRM licence or reuses an adopted
+  /// player's.
+  void _logDrmLicence(
+    FastPixPlayerDataSource dataSource, {
+    required bool adopted,
+  }) {
+    if (adopted) {
+      FastPixDrmLog.reused(
+        playbackId: dataSource.playbackId,
+        detail: 'adopted a warm player that already holds its licence',
+      );
+      return;
+    }
+    final host =
+        Uri.tryParse(dataSource.drmConfiguration?.resolvedBaseUrl ?? '')?.host ??
+        '';
+    FastPixDrmLog.armed(
+      playbackId: dataSource.playbackId,
+      reason: FastPixDrmLog.reasonPlayback,
+      host: host,
+    );
+  }
+
   Future<void> _performLoad(
     FastPixPlayerDataSource dataSource, {
     FastPixPlayerConfiguration? configuration,
     bool adoptPreloaded = true,
+    int? request,
   }) async {
     // Started before any work so the measurement covers the whole load,
     // including the DRM validation and the adoption attempt.
     _playStartClock = Stopwatch()..start();
     _firstFrameReported = false;
+    _autoPrerenderAskedFor = null;
 
     // Fail fast on an unusable DRM setup: the exception carries an actionable
     // message and is also emitted as an error event so listeners see it.
     //
     // Checked before anything is torn down, so a source that cannot play never
     // costs the viewer the source that is playing.
-    if (dataSource.drmEnabled) {
-      try {
-        dataSource.drmConfiguration!.validate(
-          playbackId: dataSource.playbackId,
-          hasPlaybackToken: dataSource.token?.isNotEmpty == true,
-        );
-      } on FastPixDrmException catch (exception) {
-        _handleDrmException(exception);
-        rethrow;
-      }
+    _validateDrm(dataSource);
+
+    // A prerendered or warm player for this source can take over with the
+    // outgoing player still on screen. Anything else — including every case in
+    // which prerendering is off — takes the path below, unchanged.
+    BetterPlayerController? handedOver;
+    final pendingClaim = _claimFor(
+      dataSource,
+      configuration,
+      adoptPreloaded: adoptPreloaded,
+    );
+    // Awaited only when there is a warm player to hand over, so a load with
+    // nothing to hand over keeps today's timing exactly.
+    final claim = pendingClaim is Future<FastPixPrerenderClaim?>
+        ? await pendingClaim
+        : pendingClaim;
+    if (claim != null) {
+      final handOff = await _settleClaim(
+        claim,
+        dataSource,
+        configuration,
+        request,
+      );
+      if (handOff.done) return;
+      handedOver = handOff.adopt;
+    } else if (_disposed) {
+      return;
     }
 
     // The outgoing player goes before the replacement is built, so at most one
@@ -1176,6 +2020,14 @@ class FastPixPlayerController implements PlayerObserver {
 
     // Nothing from the previous source may leak into this one.
     _resetForNewSource();
+
+    // Published now, not at the new source's first tick: until then a bound
+    // seekbar kept the previous source's duration and stayed draggable, so a
+    // drag begun in that window belonged to the new source. When the next
+    // snapshot reported no duration the bar disabled itself mid-drag, its
+    // release never reached [endScrub], and the scrub outlived the drag —
+    // position and preview frozen, seekForward/seekBackward ignored.
+    _emitPlaybackState();
 
     // Held pending until this source's duration is known, then validated once
     // against it — never against the previous item's.
@@ -1196,7 +2048,7 @@ class FastPixPlayerController implements PlayerObserver {
 
     final betterPlayerDataSource = dataSource.toBetterPlayerDataSource();
     final betterPlayerConfiguration = _createBetterPlayerConfiguration();
-
+    final startAt = _startPositionOf(dataSource);
     // A warmed player is already past the manifest fetch, the DRM licence and
     // decoder setup, which is what makes playback start instantly. It is never
     // guaranteed to exist: the window may have moved on, the warm-up may have
@@ -1208,15 +2060,7 @@ class FastPixPlayerController implements PlayerObserver {
     // parameter: the two differ when the caller passes null, and using the
     // parameter would make every adoption fail to match.
     final BetterPlayerController? preloaded =
-        adoptPreloaded
-            ? FastPixPreloadManager.instance.consume(
-              dataSource.playbackId,
-              fingerprint: betterPlayerConfigurationFingerprint(
-                configuration: _configuration,
-                dataSource: dataSource,
-              ),
-            )
-            : null;
+        handedOver ?? (adoptPreloaded ? _consumePreloaded(dataSource) : null);
 
     _startedFromWarmPlayer = preloaded != null;
 
@@ -1225,28 +2069,14 @@ class FastPixPlayerController implements PlayerObserver {
     // the answer is known — is the difference between "one licence per play"
     // and a number that double counts every warm start.
     if (dataSource.drmEnabled) {
-      final host = Uri.tryParse(
-            dataSource.drmConfiguration?.resolvedBaseUrl ?? '',
-          )?.host ??
-          '';
-      if (preloaded != null) {
-        FastPixDrmLog.reused(
-          playbackId: dataSource.playbackId,
-          detail: 'adopted a warm player that already holds its licence',
-        );
-      } else {
-        FastPixDrmLog.armed(
-          playbackId: dataSource.playbackId,
-          reason: FastPixDrmLog.reasonPlayback,
-          host: host,
-        );
-      }
+      _logDrmLicence(dataSource, adopted: preloaded != null);
     }
-    final BetterPlayerController player =
+    final player =
         preloaded ??
-        BetterPlayerController(
+        _buildEnginePlayer(
           betterPlayerConfiguration,
-          betterPlayerDataSource: betterPlayerDataSource,
+          betterPlayerDataSource,
+          startAt,
         );
 
     // Disposal can have landed between the guard above and here — the engine
@@ -1260,9 +2090,52 @@ class FastPixPlayerController implements PlayerObserver {
 
     _betterPlayerController = player;
     if (preloaded != null) {
-      _adoptPreloadedController(preloaded, betterPlayerConfiguration);
+      _adoptPreloadedController(preloaded, betterPlayerConfiguration, startAt);
+    } else if (startAt != null) {
+      unawaited(
+        _startFrom(
+          player,
+          startAt,
+          play: betterPlayerConfiguration.autoPlay,
+        ),
+      );
     }
 
+    await _activateEngine(dataSource, player);
+  }
+
+  /// A new engine player for a cold start.
+  BetterPlayerController _buildEnginePlayer(
+    BetterPlayerConfiguration configuration,
+    BetterPlayerDataSource dataSource,
+    Duration? startAt,
+  ) {
+    final player = BetterPlayerController(
+      // The engine's autoplay starts from 0 and the engine's own startAt
+      // seeks only after that, so the opening frames showed before the
+      // jump. With a start position, autoplay is held back here and
+      // [_startFrom] positions the player before starting it.
+      startAt == null ? configuration : configuration.copyWith(autoPlay: false),
+    );
+    // Set up here rather than through the constructor, which drops the
+    // future: a load that fails — every load made offline — then failed
+    // it at the root zone as an unhandled `PlatformException(VideoError)`,
+    // which crash reporters record as a crash. The failure itself still
+    // arrives as the engine's exception event.
+    unawaited(player.setupDataSource(dataSource).catchError((_) {}));
+    return player;
+  }
+
+  /// Bind everything per-source to [player], now the active engine player,
+  /// and announce it. Shared by every load and by a prerender's promotion.
+  ///
+  /// [onSwap] runs on the same turn as the surfaces' rebind, so whatever it
+  /// changes on screen lands in the same frame as the new player.
+  Future<void> _activateEngine(
+    FastPixPlayerDataSource dataSource,
+    BetterPlayerController player, {
+    VoidCallback? onSwap,
+  }) async {
     // Both branches above replaced the player, so any fullscreen overlay the
     // host registered is still pointing at the previous one.
     _rebindFullscreenOverlay();
@@ -1279,8 +2152,19 @@ class FastPixPlayerController implements PlayerObserver {
 
     // Last, so anything that re-reads the controller on this signal — a mounted
     // view rebinding to the new engine player — sees a fully built source.
+    onSwap?.call();
     _sourceGeneration.value++;
     _eventManager.emit(FastPixPlayerReadyEvent(timestamp: DateTime.now()));
+
+    // After ready, and unawaited: a spritesheet must never delay playback.
+    // `_configuration` rather than the argument, since it is the one that is
+    // never null, with any [setSpritesheetConfiguration] override applied.
+    unawaited(
+      _spritesheetManager.load(
+        dataSource,
+        _withSpritesheetOverride(_configuration),
+      ),
+    );
   }
 
   /// Release the engine player this controller holds, if any.
@@ -1333,6 +2217,9 @@ class FastPixPlayerController implements PlayerObserver {
     // source's are dropped and any control on screen is hidden before the new
     // source's are installed.
     _skipManager.resetForNewSource();
+
+    // The previous source's spritesheet goes, and any retry for it stops.
+    _spritesheetManager.resetForNewSource();
 
     // Custom-UI state is per-source: a new source starts at normal speed, with
     // no scrub in flight and its track-ready signals not yet fired.
@@ -1445,6 +2332,8 @@ class FastPixPlayerController implements PlayerObserver {
 
     _firstFrameReported = true;
     clock.stop();
+    // The navigation target is prerendered from here.
+    _maybeAutoPrerender();
 
     final drm = _dataSource?.drmEnabled ?? false;
     FastPixWarmLog.preload(
@@ -1483,7 +2372,8 @@ class FastPixPlayerController implements PlayerObserver {
     // for videos that never needed it, with only disposal to undo it. Nothing
     // errors, nothing logs, and the flag is invisible until someone tries to
     // take a screenshot.
-    final wantsSecureScreen = dataSource.drmEnabled &&
+    final wantsSecureScreen =
+        dataSource.drmEnabled &&
         dataSource.drmConfiguration?.secureScreen == true;
     if (!wantsSecureScreen) {
       await _clearSecureScreen();
@@ -1535,9 +2425,59 @@ class FastPixPlayerController implements PlayerObserver {
   void _adoptPreloadedController(
     BetterPlayerController controller,
     BetterPlayerConfiguration configuration,
+    Duration? startAt,
   ) {
     unawaited(controller.setLooping(_dataSource?.loop ?? false));
-    if (configuration.autoPlay) unawaited(controller.play());
+    if (startAt != null) {
+      unawaited(_startFrom(controller, startAt, play: configuration.autoPlay));
+    } else if (configuration.autoPlay) {
+      unawaited(controller.play());
+    }
+  }
+
+  /// [source]'s start position, or null when it starts at the beginning.
+  static Duration? _startPositionOf(FastPixPlayerDataSource source) {
+    final startAt = source.startAt;
+    return startAt == null || startAt <= Duration.zero ? null : startAt;
+  }
+
+  /// Position [player] at [position] once it is initialized, and only then
+  /// start it when [play] is set — so the first frame shown is the one at
+  /// [position], never the opening of the video.
+  ///
+  /// A warmed player is initialized already and is sought at once; a fresh
+  /// one is waited for. A player that fails, or is replaced or disposed
+  /// before it is ready, is left alone.
+  Future<void> _startFrom(
+    BetterPlayerController player,
+    Duration position, {
+    required bool play,
+  }) async {
+    if (player.isVideoInitialized() != true) {
+      final settled = Completer<void>();
+      void onEvent(BetterPlayerEvent event) {
+        final type = event.betterPlayerEventType;
+        if (type == BetterPlayerEventType.initialized ||
+            type == BetterPlayerEventType.exception) {
+          if (!settled.isCompleted) settled.complete();
+        }
+      }
+
+      player.addEventsListener(onEvent);
+      await settled.future;
+      player.removeEventsListener(onEvent);
+    }
+    bool current() =>
+        !_disposed &&
+        identical(_betterPlayerController, player) &&
+        player.isVideoInitialized() == true;
+    if (!current()) return;
+    try {
+      await player.seekTo(position);
+    } catch (_) {
+      // A failed seek still plays, from wherever the player is.
+    }
+    if (play && current()) await player.play();
   }
 
   /// Wraps the player on the way into the fullscreen route.
@@ -1719,6 +2659,14 @@ class FastPixPlayerController implements PlayerObserver {
     final rawError = event.parameters?['exception']?.toString();
     final drmEnabled = _dataSource?.drmEnabled ?? false;
 
+    // Armed before the error is classified, so it is still reported as the
+    // error it is — the retry is in addition to that, not instead of it.
+    if (_looksOffline(rawError)) {
+      _armOfflineRetry();
+    } else if (_isOpaqueSourceError(rawError)) {
+      unawaited(_armOfflineRetryIfOffline());
+    }
+
     if (FastPixDrmErrorClassifier.isDrmError(
       rawError,
       drmEnabled: drmEnabled,
@@ -1854,6 +2802,7 @@ class FastPixPlayerController implements PlayerObserver {
       duration: getTotalDuration(),
     );
     _emitPlaybackState();
+    _maybeAutoPrerender();
   }
 
   /// How close together an alternating play/pause pair has to arrive to count
@@ -1954,7 +2903,19 @@ class FastPixPlayerController implements PlayerObserver {
       // Inside the de-duplication, so the platform reporting completion twice
       // for the same item — which both platforms do — advances the playlist
       // exactly once.
-      _handlePlaylistCompletion();
+      if (!_handlePlaylistCompletion()) {
+        // The engine marks the end as paused on the Dart side only. On iOS it
+        // builds its AVPlayer with `actionAtItemEnd = .none`, which keeps the
+        // rate at 1 past the end, so iOS still counted the app as playing and
+        // the lock screen showed a play state the player no longer had.
+        // The video player's own pause, not the engine's: that one announces
+        // a second pause after the one dispatched above.
+        unawaited(
+          _betterPlayerController?.videoPlayerController
+              ?.pause()
+              .catchError((_) {}),
+        );
+      }
       // Playback has stopped, so progress ticks have too: publish the final
       // snapshot here or a bound control keeps its "playing" icon at the end
       // of the media.
@@ -2017,6 +2978,9 @@ class FastPixPlayerController implements PlayerObserver {
           PlayerEvent.buffering,
           () => FastPixPlayerBufferingEvent(timestamp: DateTime.now()),
         );
+        // A stall produces no progress tick, so a bound loader would never
+        // learn the video stopped.
+        _emitPlaybackState();
         break;
 
       case BetterPlayerEventType.bufferingEnd:
@@ -2024,9 +2988,12 @@ class FastPixPlayerController implements PlayerObserver {
           PlayerEvent.buffered,
           () => FastPixPlayerBufferedEvent(timestamp: DateTime.now()),
         );
+        // Nor does a paused video recovering, which would leave the loader up.
+        _emitPlaybackState();
         break;
 
       case BetterPlayerEventType.pause:
+        debugPrint('DIAG engine pause event pip=${_pipManager.isPipActiveOrPending}'); // TEMP-DIAG
         _handleTransportEvent(PlayerEvent.pause);
         break;
 
@@ -2077,17 +3044,52 @@ class FastPixPlayerController implements PlayerObserver {
 
   /// Play the video
   Future<void> play() async {
+    debugPrint('DIAG play() pip=${_pipManager.isPipActiveOrPending}\n${StackTrace.current.toString().split('\n').take(6).join('\n')}'); // TEMP-DIAG
+    if (await _reloadFailedSource()) return;
     await _betterPlayerController?.play();
+  }
+
+  /// Load the current source again when its player has failed, so play is
+  /// not a dead button.
+  ///
+  /// A failed player never plays again — ExoPlayer sits idle until it is
+  /// prepared anew and a failed `AVPlayerItem` is failed for good — so after
+  /// a failure the network retry did not catch (a WiFi that stayed joined
+  /// while its internet dropped reports no change), play did nothing and the
+  /// viewer had to load another video and come back.
+  Future<bool> _reloadFailedSource() async {
+    final failed =
+        _betterPlayerController?.videoPlayerController?.value.hasError ?? false;
+    final source = _dataSource;
+    if (!failed || source == null || _disposed) return false;
+    _offlineFailureFor = null;
+    final position = getCurrentPosition() ?? Duration.zero;
+    debugPrint('FastPix: play on a failed player — reloading '
+        '${source.playbackId}');
+    await loadPlaybackId(
+      position > Duration.zero ? source.copyWith(startAt: position) : source,
+    );
+    if (_disposed) return true;
+    // Without autoplay the reload only prepares; the viewer asked to play.
+    // With it, the load starts playback itself — after its seek, which a play
+    // from here would get ahead of.
+    if (!isPlayerAutoPlayOn()) {
+      await _betterPlayerController?.play();
+    }
+    return true;
   }
 
   /// Pause the video
   Future<void> pause() async {
+    debugPrint('DIAG pause() pip=${_pipManager.isPipActiveOrPending}\n${StackTrace.current.toString().split('\n').take(6).join('\n')}'); // TEMP-DIAG
     await _betterPlayerController?.pause();
   }
 
   /// Seek to a specific position
   Future<void> seekTo(Duration position) async {
+    debugPrint('DIAG seekTo($position) playing=$isPlaying pip=${_pipManager.isPipActiveOrPending}'); // TEMP-DIAG
     await _betterPlayerController?.seekTo(position);
+    debugPrint('DIAG seekTo done playing=$isPlaying'); // TEMP-DIAG
   }
 
   /// Set volume (0.0 to 1.0)
@@ -2158,11 +3160,29 @@ class FastPixPlayerController implements PlayerObserver {
     return _currentState == FastPixPlayerState.finished;
   }
 
+  /// The player box's shape, as last reported by the widget drawing it.
+  ///
+  /// Kept so the calls that pass no shape — the progress tick recomputes the
+  /// default size on every tick — size to the same box the widget draws.
+  double _playerAspectRatio = kFastPixDefaultAspectRatio;
+
   /// Update player dimensions (called by the widget)
   /// If width or height is null, calculates default dimensions based on screen size and orientation
-  /// In portrait: 90% of screen width with 16:9 aspect ratio, capped at 80% of screen height
-  /// In landscape: 90% of screen height with 16:9 aspect ratio, capped at 80% of screen width
-  void updatePlayerDimensions({double? width, double? height}) {
+  /// In portrait: 90% of screen width at [aspectRatio], capped at 80% of screen height
+  /// In landscape: 90% of screen height at [aspectRatio], capped at 80% of screen width
+  ///
+  /// [aspectRatio] is width divided by height; when omitted, the shape the
+  /// widget last reported, else 16:9.
+  void updatePlayerDimensions({
+    double? width,
+    double? height,
+    double? aspectRatio,
+  }) {
+    if (fastPixIsUsableAspectRatio(aspectRatio)) {
+      _playerAspectRatio = aspectRatio!;
+    }
+    final ratio = _playerAspectRatio;
+
     // Get screen dimensions
     final screenSize = _getScreenSize();
     final screenWidth = screenSize.width;
@@ -2176,25 +3196,25 @@ class FastPixPlayerController implements PlayerObserver {
       if (isLandscape) {
         // In landscape mode, use height as the primary dimension
         final defaultHeight = screenHeight * 0.9; // 90% of screen height
-        final defaultWidth = defaultHeight * (16 / 9); // 16:9 aspect ratio
+        final defaultWidth = defaultHeight * ratio;
 
         // Ensure width doesn't exceed 80% of screen width
         final maxWidth = screenWidth * 0.8;
         final finalWidth = defaultWidth > maxWidth ? maxWidth : defaultWidth;
-        final finalHeight = finalWidth * (9 / 16);
+        final finalHeight = finalWidth / ratio;
 
         _playerWidth = finalWidth;
         _playerHeight = finalHeight;
       } else {
         // In portrait mode, use width as the primary dimension
         final defaultWidth = screenWidth * 0.9; // 90% of screen width
-        final defaultHeight = defaultWidth * (9 / 16); // 16:9 aspect ratio
+        final defaultHeight = defaultWidth / ratio;
 
         // Ensure height doesn't exceed 80% of screen height
         final maxHeight = screenHeight * 0.8;
         final finalHeight =
             defaultHeight > maxHeight ? maxHeight : defaultHeight;
-        final finalWidth = finalHeight * (16 / 9);
+        final finalWidth = finalHeight * ratio;
 
         _playerWidth = finalWidth;
         _playerHeight = finalHeight;
@@ -2240,11 +3260,21 @@ class FastPixPlayerController implements PlayerObserver {
   /// Dispose the controller
   Future<void> dispose() async {
     _disposed = true;
+    // Ahead of the engine's release: a hand-off in progress gives up both
+    // players, and the hidden one goes with this controller.
+    FastPixPrerenderManager.instance.forget(_prerenderOwner);
+    _prerenderEngine.value = null;
     _lifecycleManager.detach();
     // Take this controller off the PiP channel before anything else: a
     // platform PiP transition arriving after disposal must not reach a
     // disposed event bus.
     _pipManager.dispose();
+    // Nothing of this controller's source stays on the lock screen, and the
+    // remote commands stop reaching it.
+    _nowPlayingManager.dispose();
+    unawaited(_networkRetry?.cancel());
+    _networkRetry = null;
+    _offlineFailureFor = null;
     _transportSettleTimer?.cancel();
     _transportSettleTimer = null;
     // Releasing takes the listeners off first: removing them after the field
@@ -2266,6 +3296,10 @@ class FastPixPlayerController implements PlayerObserver {
     // arriving afterwards from advancing anything.
     _playlist.clear();
     _skipManager.resetForNewSource();
+
+    // Requests and retries stop and the image is released. The manager itself
+    // stays usable, because a disposed controller may be initialized again.
+    _spritesheetManager.dispose();
 
     // Custom-UI stream. The attached cast controller is deliberately NOT
     // disposed here — the app owns it, and a session may outlive this screen.
@@ -2326,7 +3360,10 @@ class FastPixPlayerController implements PlayerObserver {
 
   @override
   bool isPlayerAutoPlayOn() {
-    return betterPlayerController?.betterPlayerConfiguration.autoPlay ?? false;
+    // The host's setting, not the engine's: warmed players and those given a
+    // start position are built with the engine's autoplay off and started by
+    // this controller instead.
+    return _configuration?.controlsConfiguration.autoPlay ?? false;
   }
 
   @override
@@ -2500,4 +3537,51 @@ class FastPixPlayerController implements PlayerObserver {
       );
     }
   }
+}
+
+/// [FastPixPlayerController] as the prerender manager sees it. Kept off the
+/// controller's own surface so none of it becomes public API.
+class _ControllerPrerenderOwner implements FastPixPrerenderOwner {
+  _ControllerPrerenderOwner(this._controller);
+
+  final FastPixPlayerController _controller;
+
+  @override
+  FastPixPlayerPrerenderConfiguration get prerenderConfiguration =>
+      _controller._prerenderConfiguration;
+
+  @override
+  FastPixPlayerConfiguration? get prerenderPlayerConfiguration =>
+      _controller._playlistConfiguration ?? _controller._configuration;
+
+  @override
+  String? get prerenderActivePlaybackId => _controller._dataSource?.playbackId;
+
+  @override
+  int? prerenderPlaylistIndexOf(String playbackId) {
+    if (!_controller.hasPlaylist) return null;
+    final index = _controller._playlist.indexOfPlaybackId(playbackId);
+    return index < 0 ? null : index;
+  }
+
+  @override
+  bool get prerenderSurfaceAvailable =>
+      _controller._prerenderSurfaces > 0 && !_controller.isFullscreen;
+
+  @override
+  bool get prerenderPipActive => _controller._pipManager.isPipActiveOrPending;
+
+  @override
+  bool get prerenderExternalPlayback => _controller.isCasting;
+
+  @override
+  double get prerenderPlaybackRate => _controller._rateManager.rate;
+
+  @override
+  void emitPrerenderEvent(FastPixPlayerEvent event) =>
+      _controller._eventManager.emit(event);
+
+  @override
+  void onPrerenderEngineChanged(BetterPlayerController? engine) =>
+      _controller._prerenderEngine.value = engine;
 }

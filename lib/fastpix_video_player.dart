@@ -16,6 +16,7 @@ export 'src/enums/fastpix_player_video_quality.dart';
 export 'src/enums/fastpix_player_rendition_order.dart';
 export 'src/enums/fastpix_player_state.dart';
 export 'src/enums/fastpix_controls_visibility.dart';
+export 'src/enums/fastpix_video_fit.dart';
 
 // Chromecast exports
 export 'src/fastpix_cast_button.dart';
@@ -42,6 +43,13 @@ export 'src/utils/fastpix_warm_log.dart';
 export 'src/utils/fastpix_drm_log.dart';
 export 'src/utils/fastpix_user_leave_hint.dart';
 
+// Prerender exports
+export 'src/models/fastpix_player_prerender_configuration.dart';
+export 'src/models/fastpix_prerender_event.dart';
+export 'src/models/fastpix_prerender_result.dart';
+export 'src/enums/fastpix_prerender_status.dart';
+export 'src/enums/fastpix_prerender_error_code.dart';
+
 // Precache exports
 export 'src/fastpix_precache_manager.dart';
 export 'src/enums/fastpix_precache_status.dart';
@@ -58,6 +66,15 @@ export 'src/enums/fastpix_playlist_repeat_mode.dart';
 export 'src/enums/fastpix_playlist_item_change_reason.dart';
 export 'src/enums/fastpix_skip_type.dart';
 export 'src/enums/fastpix_skip_failure_reason.dart';
+
+// Seek preview spritesheet exports
+export 'src/models/fastpix_player_spritesheet_configuration.dart';
+export 'src/models/fastpix_spritesheet.dart';
+export 'src/models/fastpix_spritesheet_event.dart';
+export 'src/enums/fastpix_spritesheet_type.dart';
+export 'src/enums/fastpix_spritesheet_status.dart';
+export 'src/enums/fastpix_spritesheet_error_code.dart';
+export 'src/widgets/fastpix_seek_preview.dart';
 
 // Event listener exports
 export 'src/models/fastpix_player_event.dart';

@@ -18,36 +18,17 @@ import 'package:flutter_test/flutter_test.dart';
 const String customHost = 'video.fastpix.com';
 const String customOrigin = 'https://$customHost';
 
-/// Mirrors the origin set `warmPlaybackHostsFor` derives.
+/// The origin set `warmPlaybackHostsFor` derives, read from the production
+/// function itself.
 ///
-/// The function performs real network calls, so behaviour is asserted through
-/// the host set rather than by invoking it. `hosts` is the seam both the
-/// production path and this test go through.
+/// This used to be a hand-written copy of that logic, which quietly stopped
+/// being a test: an origin added to the warm path but not to the copy was
+/// warmed by nobody's assertion. `playbackOriginsFor` is now the seam both
+/// sides go through, so drift is impossible rather than merely unlikely.
 Set<String> originsFor(
   Iterable<FastPixPlayerDataSource> sources, {
   bool includeDefaults = true,
-}) {
-  final hosts = <String>{
-    if (includeDefaults) ...const <String>[
-      FastPixPlayerDataSource.streamingHost,
-      FastPixPlayerDrmConfiguration.drmHost,
-    ],
-  };
-  for (final source in sources) {
-    hosts.add(originFor(source.customDomain));
-    if (source.drmEnabled) hosts.add(FastPixPlayerDrmConfiguration.drmHost);
-  }
-  return hosts;
-}
-
-String originFor(String? customDomain) {
-  if (customDomain == null || customDomain.isEmpty) {
-    return FastPixPlayerDataSource.streamingHost;
-  }
-  return customDomain.startsWith('http')
-      ? customDomain
-      : 'https://$customDomain';
-}
+}) => playbackOriginsFor(sources, includeDefaults: includeDefaults);
 
 FastPixPlayerDataSource source({
   String playbackId = 'abc123',
@@ -112,6 +93,51 @@ void main() {
     ], includeDefaults: false);
 
     expect(origins, hasLength(1));
+  });
+
+  group('the images host', () {
+    // Spritesheet metadata is requested as soon as a source is ready, so its
+    // origin is on the seek path and worth warming — but only for the sources
+    // that will actually request it.
+    test('is warmed for a source whose stream host derives one', () {
+      expect(
+        originsFor([
+          source(customDomain: 'stream.fastpix.co'),
+        ], includeDefaults: false),
+        containsAll(<String>[
+          'https://stream.fastpix.co',
+          'https://images.fastpix.co',
+        ]),
+      );
+    });
+
+    test('defaults to images.fastpix.com for a source with no host', () {
+      expect(
+        originsFor([source()], includeDefaults: false),
+        contains(FastPixPlayerDataSource.defaultImagesHost),
+      );
+    });
+
+    test('is absent when the stream host derives none', () {
+      // `video.fastpix.com` is a real playback host with no `stream` label, so
+      // there is no images host to warm and none must be invented.
+      final origins = originsFor([
+        source(customDomain: customHost),
+      ], includeDefaults: false);
+      expect(origins, <String>{customOrigin});
+    });
+
+    test('is absent for a live source, which has no spritesheet', () {
+      final origins = originsFor([
+        const FastPixPlayerDataSource(
+          playbackId: 'live',
+          format: FastPixStreamingFormat.hls,
+          customDomain: 'stream.fastpix.co',
+          streamType: StreamType.live,
+        ),
+      ], includeDefaults: false);
+      expect(origins, <String>{'https://stream.fastpix.co'});
+    });
   });
 
   test('an empty catalog still warms the defaults', () {

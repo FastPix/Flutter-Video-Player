@@ -6,12 +6,15 @@ import 'fastpix_cast_button.dart';
 import 'fastpix_cast_controller.dart';
 import 'fastpix_player_controller.dart';
 import 'models/fastpix_player_drm_error.dart';
+import 'utils/fastpix_error_presentation.dart';
 import 'models/fastpix_player_event.dart';
 import 'models/fastpix_player_controls_configuration.dart';
 import 'models/fastpix_player_event_types.dart';
 import 'models/fastpix_playlist_state.dart';
 import 'widgets/fastpix_pip_layout.dart';
+import 'widgets/fastpix_player_slots.dart';
 import 'widgets/fastpix_playlist_panel.dart';
+import 'utils/fastpix_aspect_ratio.dart';
 import 'utils/fastpix_video_size_watcher.dart';
 import 'utils/fastpix_playback_diagnostics.dart';
 
@@ -25,6 +28,27 @@ class FastPixPlayer extends StatefulWidget {
 
   /// Widget height
   final double? height;
+
+  /// Shape of the player box, as width divided by height: `16 / 9`, `9 / 16`
+  /// for a reel, `2 / 3`, `1`.
+  ///
+  /// Defaults to 16:9. A video of a different shape is fitted into the box by
+  /// [FastPixPlayerConfiguration.videoFit] — letterboxed by default, or
+  /// cropped to fill with [FastPixVideoFit.cover]. With
+  /// [matchVideoAspectRatio] this is only the shape used until the video
+  /// reports its own.
+  final double? aspectRatio;
+
+  /// Size the player box to the video's own shape once it is known, so a
+  /// portrait video gets a portrait player and a landscape one a landscape
+  /// player, with no bars either way.
+  ///
+  /// Until the engine reports a size — while the loading state shows — the
+  /// box uses [aspectRatio], else 16:9. Set [aspectRatio] to the
+  /// shape you expect so the box does not change when the video arrives.
+  /// Fullscreen and Picture-in-Picture already follow the video's shape either
+  /// way.
+  final bool matchVideoAspectRatio;
 
   /// Whether to show loading indicator
   final bool showLoadingIndicator;
@@ -96,6 +120,8 @@ class FastPixPlayer extends StatefulWidget {
     this.width,
     this.onReplay,
     this.height,
+    this.aspectRatio,
+    this.matchVideoAspectRatio = false,
     this.showLoadingIndicator = true,
     this.loadingIndicatorColor,
     this.placeholderWidgetBuilder,
@@ -106,7 +132,10 @@ class FastPixPlayer extends StatefulWidget {
     this.onCastPressed,
     this.castOverlayBuilder,
     this.pipBuilder,
-  });
+  }) : assert(
+         aspectRatio == null || (aspectRatio > 0 && aspectRatio < double.infinity),
+         'aspectRatio must be positive and finite',
+       );
 
   /// What the Picture-in-Picture window shows while one is open.
   ///
@@ -135,14 +164,31 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
   /// page layout, so the window shows the video and not the whole app. That
   /// matters most on Android, where the system resizes the entire activity into
   /// the PiP rectangle.
-  bool _pipActive = false;
+  ///
+  /// Read live from the controller, never cached. A PiP request is *pending*
+  /// from the moment it is made, but only the window opening is announced,
+  /// and Android shrinks the whole activity to the thumbnail in between. A
+  /// cached flag still read "inline" through that gap, so the inline layout
+  /// was built — and measured — at thumbnail size. The PiP window then scaled
+  /// from a box already the window's size, and captions came out at full,
+  /// unscaled size until the next normal-size frame corrected it.
+  bool get _pipActive => widget.controller.pip.isPipActiveOrPending;
 
-  /// Keeps the player the *same element* across a Picture-in-Picture
-  /// transition. Entering PiP replaces this widget's layout, and a re-parented
-  /// subtree without a `GlobalKey` is unmounted and rebuilt — which for
-  /// `BetterPlayer` means disposing the engine controller and ending the
-  /// playback the window is showing.
-  final GlobalKey _playerKey = GlobalKey();
+  /// Keeps each player the *same element* across a Picture-in-Picture
+  /// transition and across a prerender's promotion. Entering PiP replaces this
+  /// widget's layout, and a re-parented subtree without a `GlobalKey` is
+  /// unmounted and rebuilt — which for `BetterPlayer` means disposing the
+  /// engine controller and ending the playback the window is showing. The key
+  /// belongs to the engine player, so a promoted prerender moves too.
+  final FastPixPlayerSlots _slots = FastPixPlayerSlots();
+
+  /// The prerender in this controller's hidden slot, or null.
+  BetterPlayerController? get _hidden =>
+      fastPixPrerenderEngines[widget.controller]?.value;
+
+  void _onPrerenderChanged() {
+    if (mounted) setState(() {});
+  }
 
   /// How large the player was drawn while it was still on the page, so a PiP
   /// window can render a scaled copy of it. See [fastPixPipVideoBox].
@@ -157,11 +203,11 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
   void initState() {
     super.initState();
     _videoSize = FastPixVideoSizeWatcher(_onVideoSizeChanged);
-    _pipActive = widget.controller.pip.isPipActiveOrPending;
     widget.controller.addEventListener(
       FastPixPlayerEventTypes.pipChanged,
       _onPipChanged,
     );
+    widget.controller.pip.pendingChanges.addListener(_onPipPending);
     // Playback can fail at any point (an expiring DRM license, a dropped
     // connection), so the error state is driven by the event stream rather
     // than only by the initial wait.
@@ -175,6 +221,8 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     // rendering the engine player it latched at mount, which by then has been
     // released.
     widget.controller.sourceGeneration.addListener(_onSourceChanged);
+    fastPixPrerenderEngines[widget.controller]?.addListener(_onPrerenderChanged);
+    widget.controller.attachPrerenderSurface();
     _initializeController();
   }
 
@@ -197,9 +245,24 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     if (mounted) setState(() {});
   }
 
+  /// The shape the player box is drawn at: see [FastPixPlayer.aspectRatio]
+  /// and [FastPixPlayer.matchVideoAspectRatio].
+  double get _aspectRatio => fastPixResolveAspectRatio(
+    aspectRatio: widget.aspectRatio,
+    matchVideo: widget.matchVideoAspectRatio,
+    videoSize: _videoSize.size,
+  );
+
+  /// A window became pending, or stopped being so; on Android that decides
+  /// the layout before any window is announced.
+  void _onPipPending() {
+    if (mounted) setState(() {});
+  }
+
   void _onPipChanged(FastPixPlayerEvent _) {
     if (!mounted) return;
-    setState(() => _pipActive = widget.controller.pip.isPipActiveOrPending);
+    // Nothing to record — [_pipActive] reads the controller — only a rebuild.
+    setState(() {});
   }
 
   @override
@@ -223,12 +286,19 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
       FastPixPlayerEventTypes.pipChanged,
       _onPipChanged,
     );
+    oldWidget.controller.pip.pendingChanges.removeListener(_onPipPending);
     widget.controller.addEventListener(
       FastPixPlayerEventTypes.pipChanged,
       _onPipChanged,
     );
+    widget.controller.pip.pendingChanges.addListener(_onPipPending);
     oldWidget.controller.sourceGeneration.removeListener(_onSourceChanged);
     widget.controller.sourceGeneration.addListener(_onSourceChanged);
+    fastPixPrerenderEngines[oldWidget.controller]
+        ?.removeListener(_onPrerenderChanged);
+    oldWidget.controller.detachPrerenderSurface();
+    fastPixPrerenderEngines[widget.controller]?.addListener(_onPrerenderChanged);
+    widget.controller.attachPrerenderSurface();
     oldWidget.controller.fullscreenOverlayBuilder = null;
     _videoSize.watch(null);
     setState(() {
@@ -251,7 +321,11 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
       FastPixPlayerEventTypes.pipChanged,
       _onPipChanged,
     );
+    widget.controller.pip.pendingChanges.removeListener(_onPipPending);
     widget.controller.sourceGeneration.removeListener(_onSourceChanged);
+    fastPixPrerenderEngines[widget.controller]
+        ?.removeListener(_onPrerenderChanged);
+    widget.controller.detachPrerenderSurface();
     widget.controller.fullscreenOverlayBuilder = null;
     _videoSize.dispose();
     super.dispose();
@@ -340,38 +414,22 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     return _buildPlayerWidget();
   }
 
-  /// Opaque platform text that tells a viewer nothing and must not be shown as
-  /// the headline. ExoPlayer reports every load failure this way.
-  static final RegExp _opaquePlatformError = RegExp(
-    r'source error|video player had error|unknown error',
-    caseSensitive: false,
-  );
-
   /// The line shown the instant the error arrives. Chosen once and never
   /// replaced, so the diagnosis can only add to what the viewer already read.
-  String _headline(FastPixPlayerErrorEvent error) {
-    if (error is FastPixPlayerDrmErrorEvent &&
-        error.drmErrorCode != FastPixDrmErrorCode.unknown) {
-      // An identified DRM cause is already the most specific thing we know.
-      return error.message;
-    }
-    return _opaquePlatformError.hasMatch(error.message)
-        ? 'Playback failed'
-        : error.message;
-  }
+  ///
+  /// Shared with [FastPixVideoSurface] — see [fastPixErrorHeadline].
+  String _headline(FastPixPlayerErrorEvent error) =>
+      fastPixErrorHeadline(error);
 
   /// The line below the headline: what we are still working out, then what we
   /// found. Null when there is nothing more to say than the headline.
-  String? _detail(FastPixPlayerErrorEvent error) {
-    if (_diagnosis != null) return _diagnosis!.summary;
-    if (_diagnosing) return 'Working out why…';
-    // No probe ran, so the raw platform text is all we have left to offer.
-    final raw =
-        error is FastPixPlayerDrmErrorEvent
-            ? error.underlyingError
-            : error.message;
-    return raw != null && raw != _headline(error) ? raw : null;
-  }
+  ///
+  /// Shared with [FastPixVideoSurface] — see [fastPixErrorDetail].
+  String? _detail(FastPixPlayerErrorEvent error) => fastPixErrorDetail(
+        error,
+        diagnosis: _diagnosis,
+        diagnosing: _diagnosing,
+      );
 
   /// Build the failure widget for [error], DRM or otherwise
   Widget _buildErrorWidget(FastPixPlayerErrorEvent error) {
@@ -394,6 +452,7 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     widget.controller.updatePlayerDimensions(
       width: widget.width,
       height: widget.height,
+      aspectRatio: _aspectRatio,
     );
 
     return Container(
@@ -455,8 +514,14 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     // slot, and Flutter answers that by unmounting the old element — whose
     // dispose calls BetterPlayerController.dispose(), tearing down playback
     // mid-session. A constant shape costs nothing and cannot do that.
-    final Widget video =
-        BetterPlayer(key: _playerKey, controller: _betterPlayerController!);
+    final active = _betterPlayerController!;
+    final hidden = _hidden;
+    _slots.bind(active, hidden);
+    final Widget video = _slots.slot(
+      active,
+      hidden: false,
+      cover: Colors.black,
+    );
 
     // A PiP window shows the video alone. On Android the window IS this tree —
     // the system resizes the whole activity — so the page layout below
@@ -480,12 +545,26 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
       final build = widget.pipBuilder ?? fastPixDefaultPipLayout;
       // Scaled here rather than inside the default layout so a host that
       // supplies its own `pipBuilder` gets the same captions too.
+      // The window takes the video's shape, so draw the video at it: the
+      // engine's inner box set to the video's ratio, scaled from the area the
+      // picture filled inline rather than the whole player box. Restored to
+      // the box's ratio by the inline path's next build.
+      final videoSize = _videoSize.size;
+      if (videoSize != null) {
+        fastPixSyncEngineAspectRatio(
+          _betterPlayerController,
+          fastPixResolveAspectRatio(matchVideo: true, videoSize: videoSize),
+        );
+      }
       return build(
         context,
         fastPixPipVideoBox(
           context,
           video,
-          inlinePlayerSize: _inlineSize.value,
+          inlinePlayerSize: fastPixVideoAreaWithin(
+            _inlineSize.value,
+            videoSize,
+          ),
         ),
       );
     }
@@ -493,19 +572,31 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     // Records the size the player is drawn at here, for the PiP branch above to
     // scale down from. Sampled from the inline path because that is the only
     // place the inline layout exists.
-    _inlineSize.sampleAfterFrame(_playerKey, () => !_pipActive);
+    _inlineSize.sampleAfterFrame(_slots.keyFor(active), () => !_pipActive);
+
+    // A prerender sits beneath the active video at its size and fit — never
+    // in fullscreen, whose route holds only the active player.
+    final showHidden = hidden != null &&
+        !identical(hidden, active) &&
+        !active.isFullScreen;
 
     final Widget videoSurface = Stack(
       fit: StackFit.expand,
       children: [
+        if (showHidden) _slots.slot(hidden, hidden: true, cover: Colors.black),
         video,
         _buildPlaylistOverlay(),
         _buildTopBarOverlay(),
       ],
     );
 
+    final aspectRatio = _aspectRatio;
+    // Before the engine widget builds, which is when it reads it.
+    fastPixSyncEngineAspectRatio(_betterPlayerController, aspectRatio);
+    if (showHidden) fastPixSyncEngineAspectRatio(hidden, aspectRatio);
+
     Widget playerWidget = AspectRatio(
-      aspectRatio: 16 / 9,
+      aspectRatio: aspectRatio,
       child: videoSurface,
     );
 
@@ -513,6 +604,7 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     widget.controller.updatePlayerDimensions(
       width: widget.width,
       height: widget.height,
+      aspectRatio: aspectRatio,
     );
 
     // Use explicit dimensions if provided, otherwise let the controller calculate defaults
@@ -659,6 +751,7 @@ class _FastPixPlayerState extends State<FastPixPlayer> {
     widget.controller.updatePlayerDimensions(
       width: widget.width,
       height: widget.height,
+      aspectRatio: _aspectRatio,
     );
 
     return Container(

@@ -40,6 +40,11 @@ android {
     defaultConfig {
         minSdk 21
     }
+
+    testOptions {
+        // android.util.Log in the detector's failure paths.
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -66,4 +71,10 @@ dependencies {
     // whenever the engine's media3 does.
     compileOnly 'androidx.media3:media3-datasource:1.10.0'
     compileOnly 'androidx.media3:media3-common:1.10.0'
+    // Player.Listener and ExoPlayer, for the prerender first-frame detector.
+    compileOnly 'androidx.media3:media3-exoplayer:1.10.0'
+
+    // Guards the private engine fields the first-frame detector reflects.
+    testImplementation project(':better_player_plus')
+    testImplementation 'junit:junit:4.13.2'
 }

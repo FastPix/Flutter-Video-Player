@@ -36,6 +36,47 @@ class FastPixFairPlayBridge {
     'fastpix_video_player/precache',
   );
 
+  /// Start listening for the platform's licence-acquisition reports.
+  ///
+  /// Idempotent, and called from [configure] so a host never has to. The
+  /// handler is what turns `FastPixDrmLog`'s counters from "licences this SDK
+  /// asked for" into "licences a server answered" — see
+  /// [FastPixDrmLog.acquired].
+  static void ensureListening() {
+    if (_listening) return;
+    _listening = true;
+    _channel.setMethodCallHandler(_handle);
+  }
+
+  static bool _listening = false;
+
+  /// Deliver a platform report as the native side sends it. Tests only.
+  @visibleForTesting
+  static Future<void> debugHandle(MethodCall call) => _handle(call);
+
+  static Future<void> _handle(MethodCall call) async {
+    if (call.method != 'drmLicenceAcquired') return;
+    final arguments = call.arguments;
+    if (arguments is! Map) return;
+
+    // Read defensively: this is a platform payload, and a field the native
+    // side stops sending must not take licence reporting down with it.
+    FastPixDrmLog.acquired(
+      playbackId: '${arguments['playbackId'] ?? ''}',
+      ok: arguments['ok'] == true,
+      statusCode: _asInt(arguments['statusCode']),
+      attempts: _asInt(arguments['attempts'], fallback: 1),
+      elapsedMs: _asDouble(arguments['elapsedMs']),
+      bytes: _asInt(arguments['bytes']),
+    );
+  }
+
+  static int _asInt(Object? value, {int fallback = 0}) =>
+      value is num ? value.toInt() : fallback;
+
+  static double _asDouble(Object? value) =>
+      value is num ? value.toDouble() : 0;
+
   /// Lifts the iOS-only check so a test can exercise the rest.
   ///
   /// The check reads the *host* platform, which is never iOS under
@@ -60,6 +101,7 @@ class FastPixFairPlayBridge {
   /// apply to. Never throws.
   static Future<bool> configure(FastPixPlayerDataSource source) async {
     if (!_applies(source)) return false;
+    ensureListening();
 
     final drm = source.drmConfiguration!;
     try {

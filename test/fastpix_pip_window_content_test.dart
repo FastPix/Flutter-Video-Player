@@ -138,4 +138,26 @@ void main() {
     await tester.runAsync(controller.dispose);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets('Android switches to the window layout as soon as a window is '
+      'pending, with no PiP event', (tester) async {
+    // Automatic PiP is recorded pending at the pause, and Android shrinks the
+    // activity after it without Dart being told. Unless the pending request
+    // rebuilds the player, the page tree is only re-laid out at thumbnail
+    // size — overflow errors, and the thumbnail measured as the inline size.
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    final controller = await mounted(tester, pipBuilder: marked());
+    final player = tester.element(find.byType(BetterPlayer));
+
+    controller.pip.markAutoPipPending();
+    await pumpFor(tester);
+
+    expect(controller.pip.isPipActive, isFalse);
+    expect(find.text(windowLayoutMarker), findsOneWidget);
+    expect(tester.element(find.byType(BetterPlayer)), same(player));
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.runAsync(controller.dispose);
+    debugDefaultTargetPlatformOverride = null;
+  });
 }

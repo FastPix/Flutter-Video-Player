@@ -57,6 +57,21 @@ Future<void> warmPlaybackHostsFor(
   Iterable<FastPixPlayerDataSource> sources, {
   Duration timeout = const Duration(seconds: 3),
   bool includeDefaults = true,
+}) => warmPlaybackHosts(
+  timeout: timeout,
+  hosts: playbackOriginsFor(sources, includeDefaults: includeDefaults),
+);
+
+/// The exact origin set [warmPlaybackHostsFor] will warm for [sources].
+///
+/// Exposed because [warmPlaybackHostsFor] performs real network calls, so the
+/// only way to assert *which* hosts it picks is to read them. Tests used to
+/// re-implement this set instead, which defeats the purpose: a host added to
+/// the warm path but not to the copy is a warm nobody checks, and a wrong warm
+/// is completely silent.
+Set<String> playbackOriginsFor(
+  Iterable<FastPixPlayerDataSource> sources, {
+  bool includeDefaults = true,
 }) {
   final hosts = <String>{
     if (includeDefaults) ...const <String>[
@@ -67,6 +82,16 @@ Future<void> warmPlaybackHostsFor(
 
   for (final source in sources) {
     hosts.add(_originFor(source.customDomain));
+    // Spritesheet metadata is fetched from a second origin the moment the
+    // source is ready, so a seek that happens early otherwise pays a cold
+    // handshake. Skipped for the sources the spritesheet manager will not
+    // request at all — live sources have no spritesheet, and a host that
+    // cannot be derived is never contacted — since warming an origin nothing
+    // will use is the exact waste this function exists to remove.
+    final imagesHost = source.imagesHost;
+    if (imagesHost != null && source.streamType != StreamType.live) {
+      hosts.add(imagesHost);
+    }
     // The licence lives on a different origin, so a DRM source needs both
     // warmed or the tap still pays one cold handshake. Read from the source's
     // own configuration, since a staging source points its licence requests at
@@ -75,7 +100,7 @@ Future<void> warmPlaybackHostsFor(
     if (source.drmEnabled && drm != null) hosts.add(drm.resolvedBaseUrl);
   }
 
-  return warmPlaybackHosts(timeout: timeout, hosts: hosts);
+  return hosts;
 }
 
 /// The origin a source with [customDomain] will actually be played from.

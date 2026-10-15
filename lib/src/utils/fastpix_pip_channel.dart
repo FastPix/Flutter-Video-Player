@@ -40,6 +40,26 @@ class FastPixPipChannel {
   /// describing a video that stopped some time ago.
   static void Function(bool playing)? onPlaybackChanged;
 
+  /// Told when the viewer closed the window without returning to the app.
+  ///
+  /// Decided natively, where the platform's own callbacks say which way the
+  /// window went; Flutter's lifecycle reports arrive too late and in no fixed
+  /// order relative to the PiP report to tell the two apart.
+  static void Function()? onDismissed;
+
+  /// Android: a leave asked for a window natively and none opened, so the
+  /// pending request is over and the app is off screen without one.
+  static void Function()? onAutoPipRefused;
+
+  /// iOS: the screen locked (true) or unlocked (false) while a window was
+  /// open. The app is already in the background, so Flutter reports nothing.
+  static void Function(bool locked)? onScreenLockChanged;
+
+  /// iOS: the mounted player kept refusing to play, and native stopped the
+  /// engine's retries. Not PiP-specific; it rides this channel because the
+  /// native side that detects it is the same rate observer.
+  static void Function()? onPlaybackRefused;
+
   static bool _handlerInstalled = false;
 
   /// Begin listening. Called by the PiP manager on construction, and again
@@ -67,6 +87,15 @@ class FastPixPipChannel {
       case 'pipStateChanged':
         final args = (call.arguments as Map?)?.cast<String, dynamic>();
         onStateChanged?.call(args?['active'] as bool? ?? false);
+      case 'pipDismissed':
+        onDismissed?.call();
+      case 'autoPipRefused':
+        onAutoPipRefused?.call();
+      case 'pipScreenLockChanged':
+        final args = (call.arguments as Map?)?.cast<String, dynamic>();
+        onScreenLockChanged?.call(args?['locked'] as bool? ?? false);
+      case 'playbackRefused':
+        onPlaybackRefused?.call();
       case 'pipPlaybackChanged':
         final args = (call.arguments as Map?)?.cast<String, dynamic>();
         onPlaybackChanged?.call(args?['playing'] as bool? ?? false);
@@ -148,6 +177,25 @@ class FastPixPipChannel {
   static Future<bool> setAutoEnter(bool enabled) =>
       _ask<bool>('setAutoEnter', {'enabled': enabled});
 
+  /// Tell the platform whether leaving the app right now should open a window:
+  /// PiP enabled, automatic PiP on and a video playing.
+  ///
+  /// Android needs it in advance. Its window for entering PiP closes as the
+  /// activity stops, which on some devices is before a hint relayed to Dart
+  /// can be answered, so native decides at the hint from this — and Android
+  /// 12+ opens the window itself. iOS does not implement it and answers false.
+  static Future<bool> setAutoEnterArmed(bool armed) =>
+      _ask<bool>('setAutoEnterArmed', {'armed': armed});
+
+  /// Allow or forbid Picture-in-Picture entirely.
+  ///
+  /// iOS needs telling: it can start a window by itself for a video it treats
+  /// as full screen, whatever [setAutoEnter] says, so the only sure way to
+  /// stop it is to hold no PiP controller at all. Android starts PiP only when
+  /// Dart asks, and answers without acting.
+  static Future<bool> setEnabled(bool enabled) =>
+      _ask<bool>('setEnabled', {'enabled': enabled});
+
   /// Report the video's real shape, so the window is not a fixed 16:9.
   static Future<void> setAspectRatio(double width, double height) async {
     if (width <= 0 || height <= 0) return;
@@ -177,6 +225,8 @@ class FastPixPipChannel {
     onStateChanged = null;
     onFailure = null;
     onPlaybackChanged = null;
+    onDismissed = null;
+    onAutoPipRefused = null;
     _handlerInstalled = false;
     _channel.setMethodCallHandler(null);
   }

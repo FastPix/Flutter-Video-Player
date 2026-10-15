@@ -66,6 +66,7 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
     manager.warmedPlayerFactory = null;
+    manager.debugForgetPlayerBuilds();
     manager.clearAll();
     FastPixFairPlayBridge.debugApplyOnEveryPlatform = false;
   });

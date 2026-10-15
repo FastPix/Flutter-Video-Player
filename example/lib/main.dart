@@ -11,6 +11,11 @@ void main() async {
   // different token, a different URL, and therefore a different cache key,
   // which reads as "precaching does not work" when the test is at fault.
   WidgetsFlutterBinding.ensureInitialized();
+  // Preload and prerender timings are debug-only by default; profile builds
+  // measure them with `--dart-define=FASTPIX_WARM_LOG=true`.
+  if (const bool.fromEnvironment('FASTPIX_WARM_LOG')) {
+    FastPixWarmLog.enabled = true;
+  }
   await Catalog.instance.load();
 
   // Layer B: one throwaway request per playback host. Both are expected to

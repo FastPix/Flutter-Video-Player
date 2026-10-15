@@ -1,5 +1,6 @@
 import 'package:fastpix_video_player/fastpix_video_player.dart';
 import 'package:fastpix_video_player/src/managers/fastpix_lifecycle_manager.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -107,6 +108,232 @@ void main() {
       await PlayerTestHarness.settle();
 
       expect(requests, hasLength(1));
+      manager.detach();
+      await controller.dispose();
+    });
+  });
+
+  group('pending from the pause on Android', () {
+    // Android 12+ shrinks the activity into the window by itself; a frame at
+    // thumbnail size before Dart knows lays the page out there (overflow) and
+    // measures it as the inline size (unscaled captions). The pause comes
+    // first, so the window is recorded as pending there.
+    Future<(FastPixPlayerController, FastPixLifecycleManager, List<int>)>
+        leaving({required bool wantsAutoPip}) async {
+      final controller = FastPixPlayerController();
+      await PlayerTestHarness.load(controller, PlayerTestHarness.source('a'));
+      await controller.play();
+      await PlayerTestHarness.settle();
+      final marks = <int>[];
+      final manager = FastPixLifecycleManager(
+        () => controller.betterPlayerController,
+        () => false,
+        wantsAutoPip: () => wantsAutoPip,
+        markPipPending: () => marks.add(1),
+      )..attach();
+      manager.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      return (controller, manager, marks);
+    }
+
+    tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    test('leaving while playing marks the window pending', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final (controller, manager, marks) = await leaving(wantsAutoPip: true);
+
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+
+      expect(marks, hasLength(1));
+      manager.detach();
+      await controller.dispose();
+    });
+
+    test('not when the host did not ask for automatic PiP', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final (controller, manager, marks) = await leaving(wantsAutoPip: false);
+
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+
+      expect(marks, isEmpty);
+      manager.detach();
+      await controller.dispose();
+    });
+
+    test('not on the way back through inactive', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final (controller, manager, marks) = await leaving(wantsAutoPip: true);
+      manager.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      marks.clear();
+
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+
+      expect(marks, isEmpty);
+      manager.detach();
+      await controller.dispose();
+    });
+
+    test('not on iOS, where the window is not this tree', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final (controller, manager, marks) = await leaving(wantsAutoPip: true);
+
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+
+      expect(marks, isEmpty);
+      manager.detach();
+      await controller.dispose();
+    });
+  });
+
+  group('screen off with a PiP window open', () {
+    // Android keeps an activity whose PiP window is showing only paused; a
+    // stop means the screen went off and the window with it. The PiP
+    // exemption used to keep the video playing there, so a locked phone
+    // played on.
+    Future<(FastPixPlayerController, FastPixLifecycleManager)>
+        inWindow() async {
+      final controller = FastPixPlayerController();
+      await PlayerTestHarness.load(controller, PlayerTestHarness.source('a'));
+      await controller.play();
+      await PlayerTestHarness.settle();
+      final manager = FastPixLifecycleManager(
+        () => controller.betterPlayerController,
+        () => true,
+        pipWindowOpen: () => true,
+      )..attach();
+      manager.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      return (controller, manager);
+    }
+
+    tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    test('pauses, and resumes when the window '
+        'shows again', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final (controller, manager) = await inWindow();
+
+      manager.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      manager.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isFalse);
+
+      manager.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isTrue);
+      manager.detach();
+      await controller.dispose();
+    });
+
+    test('a window closed after the screen went off is not resumed on '
+        'return', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final (controller, manager) = await inWindow();
+      manager.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      manager.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await PlayerTestHarness.settle();
+
+      manager.onPipDismissed();
+      manager.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isFalse);
+      manager.detach();
+      await controller.dispose();
+    });
+
+    test('iOS is unchanged: its window is not this activity', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final (controller, manager) = await inWindow();
+
+      manager.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      manager.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isTrue);
+      manager.detach();
+      await controller.dispose();
+    });
+
+    // iOS gets no lifecycle change for a lock: the app is already in the
+    // background. Native reports it instead.
+    test('iOS: a lock pauses, and the unlock '
+        'resumes', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final (controller, manager) = await inWindow();
+      manager.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      manager.didChangeAppLifecycleState(AppLifecycleState.paused);
+
+      manager.onPipWindowScreenLock(true);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isFalse);
+
+      manager.onPipWindowScreenLock(false);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isTrue);
+      manager.detach();
+      await controller.dispose();
+    });
+
+    // A window opened from the player's PiP button: the app is in the
+    // foreground when the phone locks, and iOS activates it on the way out.
+    test('iOS: the activation a lock over a manual window posts does not '
+        'resume', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final (controller, manager) = await inWindow();
+      manager.didChangeAppLifecycleState(AppLifecycleState.resumed);
+
+      manager.onPipWindowScreenLock(true);
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      manager.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      manager.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      manager.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isFalse);
+
+      // Waking the screen, before the unlock.
+      manager.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      manager.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isFalse);
+
+      manager.onPipWindowScreenLock(false);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isTrue);
+      manager.detach();
+      await controller.dispose();
+    });
+
+    test('iOS: a pause from the lock screen is not undone by the unlock',
+        () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final (controller, manager) = await inWindow();
+      manager.onPipWindowScreenLock(true);
+      await PlayerTestHarness.settle();
+
+      // Played, then paused again, from the lock screen.
+      manager.viewerTookOver();
+      await controller.play();
+      manager.viewerTookOver();
+      await controller.pause();
+      await PlayerTestHarness.settle();
+
+      manager.onPipWindowScreenLock(false);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isFalse);
+      manager.detach();
+      await controller.dispose();
+    });
+
+    test('iOS: a video the viewer paused stays paused on unlock', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final (controller, manager) = await inWindow();
+      await controller.pause();
+      await PlayerTestHarness.settle();
+
+      manager.onPipWindowScreenLock(true);
+      manager.onPipWindowScreenLock(false);
+      await PlayerTestHarness.settle();
+      expect(isPlaying(controller), isFalse);
       manager.detach();
       await controller.dispose();
     });

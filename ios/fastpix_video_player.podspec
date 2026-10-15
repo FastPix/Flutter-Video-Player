@@ -7,7 +7,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'fastpix_video_player'
-  s.version          = '1.1.2'
+  s.version          = '1.2.0'
   s.summary          = 'FastPix video player preload support for iOS.'
   s.description      = <<-DESC
 Warms AVURLAssets for upcoming titles so a tap does not pay for DNS, TLS and

@@ -254,4 +254,35 @@ void main() {
       });
     });
   });
+
+  group('images host in playlist JSON', () {
+    // The key was removed before the feature shipped. Unknown keys are ignored
+    // by design, so a playlist written against an early build still parses —
+    // it just no longer overrides anything.
+    test('a leftover spritesheetDomain key is ignored, not rejected', () {
+      final source = FastPixPlayerDataSource.fromJson(<String, dynamic>{
+        'playbackId': 'abc',
+        'customDomain': 'stream.fastpix.co',
+        'spritesheetDomain': 'images.example.com',
+      });
+      expect(source.imagesHost, 'https://images.fastpix.co');
+    });
+
+    test('the images host follows customDomain', () {
+      expect(
+        FastPixPlayerDataSource.fromJson(<String, dynamic>{
+          'playbackId': 'abc',
+          'customDomain': 'stream.fastpix.co',
+        }).imagesHost,
+        'https://images.fastpix.co',
+      );
+      expect(
+        FastPixPlayerDataSource.fromJson(<String, dynamic>{
+          'playbackId': 'abc',
+        }).imagesHost,
+        FastPixPlayerDataSource.defaultImagesHost,
+      );
+    });
+  });
+
 }

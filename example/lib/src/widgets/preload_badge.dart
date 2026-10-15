@@ -204,17 +204,22 @@ class UpNextCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Expanded(
-              child: Container(
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1F242C),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                padding: const EdgeInsets.all(8),
-                child: Align(
-                  alignment: Alignment.topLeft,
-                  child: PreloadStatusDot(playbackId: playbackId),
+            AspectRatio(
+              aspectRatio: 16 / 9,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: <Widget>[
+                    const ColoredBox(color: Color(0xFF1F242C)),
+                    Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: Align(
+                        alignment: Alignment.topLeft,
+                        child: PreloadStatusDot(playbackId: playbackId),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),

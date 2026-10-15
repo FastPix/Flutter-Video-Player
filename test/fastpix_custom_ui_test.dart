@@ -33,8 +33,9 @@ void main() {
 
   group('FastPixQualityLevel.fromAsmsTrack', () {
     test('the engine default/empty track maps to automatic', () {
-      final level =
-          FastPixQualityLevel.fromAsmsTrack(BetterPlayerAsmsTrack.defaultTrack());
+      final level = FastPixQualityLevel.fromAsmsTrack(
+        BetterPlayerAsmsTrack.defaultTrack(),
+      );
       expect(level.isAuto, true);
       expect(level, FastPixQualityLevel.automatic);
     });
@@ -100,8 +101,10 @@ void main() {
     test('updateScrub never seeks; endScrub seeks exactly once', () async {
       final seeks = <Duration>[];
       final events = FastPixPlayerEventManager();
-      final scrub =
-          FastPixScrubController((pos) async => seeks.add(pos), events);
+      final scrub = FastPixScrubController(
+        (pos) async => seeks.add(pos),
+        events,
+      );
 
       scrub.beginScrub(const Duration(seconds: 3));
       expect(scrub.isScrubbing, true);
@@ -117,8 +120,9 @@ void main() {
 
     test('emits scrub started and ended events', () async {
       final types = <String>[];
-      final events = FastPixPlayerEventManager()
-        ..addGlobalListener((e) => types.add(e.type));
+      final events =
+          FastPixPlayerEventManager()
+            ..addGlobalListener((e) => types.add(e.type));
       final scrub = FastPixScrubController((_) async {}, events);
 
       scrub.beginScrub(Duration.zero);
@@ -127,6 +131,55 @@ void main() {
       expect(types, contains(FastPixPlayerEventTypes.scrubStarted));
       expect(types, contains(FastPixPlayerEventTypes.scrubEnded));
     });
+
+    test('cancelScrub drops the scrub without seeking or an event', () {
+      final seeks = <Duration>[];
+      final types = <String>[];
+      final events =
+          FastPixPlayerEventManager()
+            ..addGlobalListener((e) => types.add(e.type));
+      final scrub = FastPixScrubController(
+        (pos) async => seeks.add(pos),
+        events,
+      );
+
+      expect(scrub.cancelScrub(), isFalse); // nothing to cancel
+      scrub.beginScrub(const Duration(seconds: 3));
+      scrub.updateScrub(const Duration(seconds: 40));
+
+      expect(scrub.cancelScrub(), isTrue);
+      expect(scrub.isScrubbing, isFalse);
+      expect(seeks, isEmpty);
+      expect(types, isNot(contains(FastPixPlayerEventTypes.scrubEnded)));
+      // A later update without a new begin is ignored as before.
+      scrub.updateScrub(const Duration(seconds: 50));
+      expect(scrub.isScrubbing, isFalse);
+    });
+
+    test(
+      'a cancelled scrub hands the reported position back to the playhead',
+      () async {
+        final controller = FastPixPlayerController();
+        final emitted = <FastPixPlaybackState>[];
+        final sub = controller.playbackStateStream.listen(emitted.add);
+
+        controller.beginScrub(const Duration(seconds: 30));
+        expect(controller.playbackState.position, const Duration(seconds: 30));
+
+        controller.cancelScrub();
+        await Future<void>.delayed(Duration.zero);
+        expect(controller.isScrubbing, isFalse);
+        // No engine: the live playhead reads zero, not the abandoned target.
+        expect(controller.playbackState.position, Duration.zero);
+        expect(emitted.last.position, Duration.zero);
+
+        emitted.clear();
+        controller.cancelScrub(); // idle: nothing re-published
+        await Future<void>.delayed(Duration.zero);
+        expect(emitted, isEmpty);
+        await sub.cancel();
+      },
+    );
 
     test('a negative release position is clamped to zero', () async {
       final seeks = <Duration>[];
@@ -162,11 +215,11 @@ void main() {
 
     test('emits a rate-changed event when the rate changes', () async {
       final rates = <double>[];
-      final events = FastPixPlayerEventManager()
-        ..addEventListener(
-          FastPixPlayerEventTypes.playbackRateChanged,
-          (e) => rates.add((e as FastPixPlaybackRateChangedEvent).rate),
-        );
+      final events =
+          FastPixPlayerEventManager()..addEventListener(
+            FastPixPlayerEventTypes.playbackRateChanged,
+            (e) => rates.add((e as FastPixPlaybackRateChangedEvent).rate),
+          );
       final manager = FastPixPlaybackRateManager(() => null, events);
       await manager.setRate(1.5);
       expect(rates, [1.5]);
@@ -183,16 +236,20 @@ void main() {
     });
 
     test('audio: empty list, null current, no throw on switch', () async {
-      final a =
-          FastPixAudioTrackManager(() => null, FastPixPlayerEventManager());
+      final a = FastPixAudioTrackManager(
+        () => null,
+        FastPixPlayerEventManager(),
+      );
       expect(a.getTracks(), isEmpty);
       expect(a.current, isNull);
       await a.setTrack(const FastPixAudioTrack(id: '0')); // must not throw
     });
 
     test('subtitle: empty list, null current, disable is a no-op', () async {
-      final s =
-          FastPixSubtitleTrackManager(() => null, FastPixPlayerEventManager());
+      final s = FastPixSubtitleTrackManager(
+        () => null,
+        FastPixPlayerEventManager(),
+      );
       expect(s.getTracks(), isEmpty);
       expect(s.current, isNull);
       await s.disable(); // must not throw
@@ -222,11 +279,11 @@ void main() {
 
     test('notifyActive flips state and emits a pip-changed event', () {
       final states = <bool>[];
-      final events = FastPixPlayerEventManager()
-        ..addEventListener(
-          FastPixPlayerEventTypes.pipChanged,
-          (e) => states.add((e as FastPixPipChangedEvent).isActive),
-        );
+      final events =
+          FastPixPlayerEventManager()..addEventListener(
+            FastPixPlayerEventTypes.pipChanged,
+            (e) => states.add((e as FastPixPipChangedEvent).isActive),
+          );
       final pip = FastPixPipManager(events);
 
       pip.notifyActive(true);
@@ -240,11 +297,11 @@ void main() {
 
     test('entering with no engine surfaces a playerNotReady error', () async {
       final codes = <String?>[];
-      final events = FastPixPlayerEventManager()
-        ..addEventListener(
-          FastPixPlayerEventTypes.error,
-          (e) => codes.add((e as FastPixPlayerErrorEvent).code),
-        );
+      final events =
+          FastPixPlayerEventManager()..addEventListener(
+            FastPixPlayerEventTypes.error,
+            (e) => codes.add((e as FastPixPlayerErrorEvent).code),
+          );
       final pip = FastPixPipManager(events, hasPreparedSource: () => false);
       await pip.enterPip();
       expect(codes, [FastPixCustomUIErrorCode.playerNotReady.value]);
@@ -253,7 +310,10 @@ void main() {
 
   group('FastPixCustomUIErrorCode', () {
     test('every code has a stable string value', () {
-      expect(FastPixCustomUIErrorCode.castUnavailable.value, 'cast_unavailable');
+      expect(
+        FastPixCustomUIErrorCode.castUnavailable.value,
+        'cast_unavailable',
+      );
       expect(FastPixCustomUIErrorCode.playerNotReady.value, 'player_not_ready');
       expect(
         FastPixCustomUIErrorCode.values.map((c) => c.value).toSet().length,

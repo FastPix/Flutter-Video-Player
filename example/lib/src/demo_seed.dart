@@ -174,6 +174,10 @@ class DemoSeed {
     '76a15ba8-7db2-4c72-b9e0-e15c454f4d9b, Magnificent view of Earth (4 hr)',
     'e5ce0dd5-e927-455e-ac4a-42044d0d1ed4, Thirty second video',
     '6ea06f51-03fa-4892-8469-eb98c241c048, Nature II',
+    'fb851d80-bc74-4959-97e0-b0bece0c1945,cartoon',
+    'be99a892-9bd1-46c4-b1bf-9950ae9aaff1, reel1',
+    '9d30cad8-fc79-41bc-9359-7ef8194b9500,reel2',
+    'ce8a4e04-fbc6-4a4b-8d49-95821afa83d4,reel3'
     // No DRM entries here, deliberately. A protected stream needs a licence
     // token, a committed file may not carry one, and a DRM playback ID listed
     // without its token and its host is not a stream that half works — it is a

@@ -61,6 +61,22 @@ NS_ASSUME_NONNULL_BEGIN
 /// its asset, so without this there is nothing to match on.
 + (void)noteAsset:(AVURLAsset *)asset url:(NSURL *)url;
 
+/// Called when a licence acquisition finishes, successfully or not.
+///
+/// The report carries `playbackId`, `ok`, `statusCode`, `attempts`,
+/// `elapsedMs` and `bytes`, ready to hand to a Flutter channel unchanged.
+///
+/// Exists because this is the only place in the process that knows what the
+/// licence server actually did. Dart counts what the SDK intends — an arming,
+/// a configuration, a reuse — and `FastPixDrmLog` documents that it cannot see
+/// the request itself. A protected start that took fifty seconds because the
+/// server threw twice is invisible without this.
+///
+/// Called on whichever queue answered the key request, which is
+/// AVFoundation's, never the main one. A host that touches UI must hop.
+@property (class, nonatomic, copy, nullable)
+    void (^acquisitionCallback)(NSDictionary<NSString *, id> *report);
+
 /// Whether [install] succeeded. Exposed so a failure is assertable from Dart
 /// rather than only visible in a device log.
 + (BOOL)isInstalled;

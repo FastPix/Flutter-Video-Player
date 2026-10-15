@@ -38,6 +38,7 @@ void main() {
 
   tearDown(() {
     manager.warmedPlayerFactory = null;
+    manager.debugForgetPlayerBuilds();
     manager.clearAll();
     FastPixDrmLog.reset();
   });

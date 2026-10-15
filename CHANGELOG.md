@@ -1,5 +1,45 @@
 # Changelog
 
+## [1.2.0]
+
+### Added
+- **Player aspect ratio**: `FastPixPlayer.aspectRatio` (default 16:9) and `matchVideoAspectRatio` (also on `FastPixVideoSurface`), which sizes the player to the video once its size is known
+- **Video fit**: `FastPixPlayerConfiguration.videoFit` — `contain` (default) or `cover`, on Android and iOS. Part of the preload adoption fingerprint
+- **Seek preview spritesheets**: on-demand sources load the FastPix spritesheet in the background, giving a seek bar a thumbnail for any position. Not available for live
+- **Advanced spritesheets**: `enableAdvancedSpritesheet: true` loads a thumbnail every `advancedSpritesheetInterval` seconds (1–10; out of range uses `10`) instead of the normal sheet. An interval not generated yet is retried after 1, 2, 4, 8 and 15 seconds
+- **Spritesheet configuration**: `FastPixPlayerConfiguration.spritesheetConfiguration` — `enableSpritesheet` (default `true`), `enableAdvancedSpritesheet` (default `false`), `advancedSpritesheetInterval` (default `10`)
+- **Images host**: `imagesHost` on the data source, derived from `customDomain` (`stream.fastpix.co` → `images.fastpix.co`), default `images.fastpix.com`. A domain that is not `stream.*` gets a time-only preview
+- **Spritesheet API**: `spritesheet`, `spritesheetStream`, `spritesheetStatus`, `spritesheetTileAt(position)`; the `FastPixSeekPreview` widget; events `spritesheetLoadStarted`, `spritesheetLoaded`, `spritesheetImageReady`, `spritesheetFailed` (with `FastPixSpritesheetErrorCode`). Failures never affect playback
+- **Large spritesheets**: an image too large to decode at full size is decoded at a reduced size
+- **`cancelScrub()`**: abandons a scrub without seeking, for a seek bar torn down mid-drag (entering fullscreen or PiP rebuilds the controls without ending the drag). Emits no `scrubEnded`
+- **Now Playing** (iOS): the playing source's title, duration, position and playback rate are shown on the lock screen and in Control Center, and their play, pause and seek commands are handled like taps in the app, with the same events and analytics. Cleared while casting to Chromecast. `FastPixPlayerConfiguration.enableNowPlaying` (default `true`)
+- **DRM licence counts** (iOS): `FastPixDrmLog` now counts actual licence acquisitions — `acquiredCount`, `acquisitionFailureCount`, `retriedAcquisitionCount` — and logs `acquired=`, `failed=` and `retried=`
+- **Prerendering**: the next playlist item is held ready on a hidden surface, so Next and autoplay-next show video at once. On by default; skipped for DRM, live, PiP, Cast and background, and never a playback error
+- **Prerender configuration**: `prerenderConfiguration` — `enablePrerender` (default `true`), `prerenderOnCellular` (default `true`); `updatePrerenderConfiguration` changes it at run time
+- **Prerender API**: `prerender(source)`, `cancelPrerender`, `prerenderStatusOf`; events `prerenderRequested`, `prerenderReady`, `prerenderFailed`
+
+### Changed
+- **iOS letterboxes by default**, matching Android; it previously cropped. Use `videoFit: FastPixVideoFit.cover` for the old behaviour
+- **`startAt` resumes before the first frame**: the player is positioned at `startAt` and only then started, for fresh and preloaded players alike, so a resumed video never shows its opening seconds first
+- Skip-segment seeks are ignored while the viewer is scrubbing
+- **Engine pinned to `better_player_plus: 1.2.1`**, from `^1.2.1`; prerendering depends on its internals
+- iOS: `pip.enabled = false` now also stops windows iOS opens by itself
+
+### Fixed
+- Android PiP: captions were sometimes drawn at full size
+- Android PiP: vertical videos opened in a landscape window and did not fill it
+- FairPlay: licence requests for different titles now run concurrently instead of one at a time
+- FairPlay: a 5xx or network failure on a licence request is retried up to 3 times (4xx fails immediately), without blocking other loading
+- FairPlay: time to first frame reduced from **22.1s to 2.9s** in device testing
+- A source that failed because the device had no network is reloaded automatically when the network returns, resuming where it stopped. A failed platform player never recovers on its own, so the video stayed stuck until the viewer loaded a different source and came back to it
+- iOS PiP: stalls after a seek no longer freeze the window
+- Android 13+: the nearby devices permission is requested once per process instead of on every discovery
+- Play on a failed source reloads it instead of doing nothing
+- iOS: the lock screen showed a playing state after a video ended
+- iOS PiP: a screen lock now pauses the video until unlock; the window stays open
+- iOS PiP: closing the window from its own button, or by locking the phone, left the player black or unplayable
+- iOS PiP: the next playlist item played in the window and the app at once
+
 ## [1.1.2]
 
 ### Added
@@ -16,7 +56,7 @@
 - **Picture-in-Picture**: `controller.pip` — `enterPip()`, `exitPip()`, `togglePip()`, `isPipAvailable()`, `isPipActive`, `enabled`, `autoEnterOnBackground`, `setPipAudioBehavior()` — plus `FastPixPipChangedEvent` and `pipBuilder`. Needs `android:supportsPictureInPicture` and the iOS `audio` background mode
 - **Playlist panel**: `FastPixPlaylistPanel`, the queue the bundled skin opens
 - **Event types**: `playlistChanged`, `playlistItemChanged`, `playlistEnded`, `skipAvailable`, `skipHidden`, `skipCompleted`, `skipFailed`, `playbackRateChanged`, `scrubStarted`, `scrubEnded`, `qualityLevelsReady`, `qualityLevelChanged`, `audioTracksReady`, `audioTrackChanged`, `subtitleTracksReady`, `subtitleChanged`, `pipChanged`
-- **Controls configuration**: `enableSkips` (default `false`), `showPlaylistControls`, `showPlaylistPanel`, `showCastWhenNoDevices`
+- **Controls configuration**: `enableSkips` (default `false`; the skin's ±10 s seek buttons, unrelated to skip segments), `showPlaylistControls`, `showPlaylistPanel`, `showCastWhenNoDevices`
 - **`sourceGeneration`**: a `ValueListenable<int>`, incremented once per source load
 
 ### Changed

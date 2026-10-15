@@ -62,9 +62,33 @@ NS_ASSUME_NONNULL_BEGIN
 /// Whether a PiP window is showing right now.
 + (BOOL)isActive;
 
+/// Whether a PiP window is on its way: AVKit has said it will start and has
+/// not yet said it did, or failed.
++ (BOOL)isStarting;
+
 /// Whether a video surface is mounted that PiP could attach to. False before
 /// the first frame of a source, and after every surface has gone away.
 + (BOOL)hasAttachableSurface;
+
+/// The `AVPlayer` behind the layer a PiP request would use, or nil when no
+/// usable layer is mounted.
++ (nullable AVPlayer *)currentPlayer;
+
+/// The layer a PiP request would use, or nil when none is mounted.
++ (nullable AVPlayerLayer *)currentLayer;
+
+/// Whether a player's textureId can be mapped to its layer: the engine view
+/// factory is interposed. Without it prerendering is unsupported.
++ (BOOL)isPrerenderSupported;
+
+/// Mark [textureId]'s player as `prerender` (hidden: never selected by PiP,
+/// and its mount announces nothing), `active`
+/// (promoted: the skipped mount callbacks run now) or `released` (forgotten,
+/// with no callbacks). Main thread.
++ (void)setPrerenderRole:(NSString *)role forTextureId:(int64_t)textureId;
+
+/// The mounted layer of [textureId]'s player, or nil before it mounts.
++ (nullable AVPlayerLayer *)layerForTextureId:(int64_t)textureId;
 
 /// Arm or disarm system-initiated PiP.
 ///
@@ -73,6 +97,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// starting PiP is already illegal. Instead iOS consults this flag on the
 /// live controller and starts the window itself.
 + (void)setAutoEnterEnabled:(BOOL)enabled;
+
+/// Allow or forbid Picture-in-Picture entirely. While forbidden no
+/// `AVPictureInPictureController` is held, so no window opens on request or by
+/// itself — including the one iOS starts for a layer it treats as full screen,
+/// which `setAutoEnterEnabled:` cannot prevent. A window already open is left
+/// to close; its controller is released when it does.
++ (void)setEnabled:(BOOL)enabled;
++ (BOOL)isEnabled;
 
 /// Ask for a PiP window now.
 ///
@@ -98,6 +130,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// Set by the plugin to forward onto the channel.
 @property (class, nonatomic, copy, nullable) void (^stateCallback)(BOOL active);
 
+/// Called when the viewer closed the window without returning to the app —
+/// the window stopped and iOS never asked to restore the app's interface.
+@property (class, nonatomic, copy, nullable) void (^dismissedCallback)(void);
+
 /// Called on the main thread when the platform refuses a session, with a
 /// human-readable reason for the Dart error event.
 @property (class, nonatomic, copy, nullable) void (^failureCallback)(NSString *reason);
@@ -110,6 +146,17 @@ NS_ASSUME_NONNULL_BEGIN
 /// never told the viewer paused, and its controls, progress and analytics all
 /// drift out of step with what the window is actually doing.
 @property (class, nonatomic, copy, nullable) void (^playbackCallback)(BOOL playing);
+
+/// Called on the main thread when the screen locks while a window is open,
+/// and again when it unlocks. A locked screen hides the window but not its
+/// audio, and the app — already in the background — gets no lifecycle change
+/// for it, so without this the off-screen pause never applies.
+@property (class, nonatomic, copy, nullable) void (^screenLockCallback)(BOOL locked);
+
+/// Called on the main thread when the mounted player kept refusing to play
+/// and its retries were stopped; Dart pauses the controller so the engine and
+/// the app's controls agree the video is paused.
+@property (class, nonatomic, copy, nullable) void (^playbackRefusedCallback)(void);
 
 @end
 

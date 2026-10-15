@@ -60,6 +60,9 @@ class FastPixDrmLog {
   static final Map<String, int> _byPlaybackId = <String, int>{};
   static int _total = 0;
   static int _reused = 0;
+  static int _acquired = 0;
+  static int _acquisitionFailures = 0;
+  static int _retriedAcquisitions = 0;
 
   /// Record one licence arming.
   ///
@@ -103,6 +106,44 @@ class FastPixDrmLog {
     );
   }
 
+  /// Record what the licence server actually did, as reported by the platform.
+  ///
+  /// The counterpart to [armed], and the honest one. [armed] counts licences
+  /// this SDK *intends* to have fetched; this counts the ones a server really
+  /// answered, with the time it took and how many attempts it needed. The two
+  /// disagreeing is information, not a bug — a warm player that was evicted
+  /// before adoption arms without ever acquiring.
+  ///
+  /// Reported from iOS by `FastPixFairPlayPatch`. Android's acquisitions happen
+  /// inside media3 and do not pass through here; `adb logcat -s
+  /// DefaultDrmSession:V` is still the place to see those.
+  static void acquired({
+    required String playbackId,
+    required bool ok,
+    int statusCode = 0,
+    int attempts = 1,
+    double elapsedMs = 0,
+    int bytes = 0,
+  }) {
+    if (ok) {
+      _acquired++;
+      if (attempts > 1) _retriedAcquisitions++;
+    } else {
+      _acquisitionFailures++;
+    }
+
+    if (!enabled) return;
+    debugPrint(
+      '$tag id=$playbackId ${ok ? 'acquired' : 'FAILED'} '
+      '${ok ? '$bytes bytes ' : 'status=$statusCode '}'
+      'in ${elapsedMs.round()}ms'
+      '${attempts > 1 ? ' after $attempts attempts' : ''}'
+      ' (acquired=$_acquired'
+      '${_acquisitionFailures == 0 ? '' : ' failed=$_acquisitionFailures'}'
+      '${_retriedAcquisitions == 0 ? '' : ' retried=$_retriedAcquisitions'})',
+    );
+  }
+
   /// Record the iOS FairPlay patch being pointed at a licence URL.
   ///
   /// Logged, never counted: it is the *ability* to fetch a licence, not a
@@ -135,6 +176,19 @@ class FastPixDrmLog {
   /// every reuse is a licence acquisition that did not happen on the tap path.
   static int get reuseCount => _reused;
 
+  /// Licences a server really answered, as reported by the platform.
+  ///
+  /// Compare with [total]: that is what the SDK asked for, this is what
+  /// arrived.
+  static int get acquiredCount => _acquired;
+
+  /// Acquisitions the server refused or that never completed.
+  static int get acquisitionFailureCount => _acquisitionFailures;
+
+  /// Acquisitions that succeeded only after a retry — the count that separates
+  /// a healthy licence service from one that is costing viewers seconds.
+  static int get retriedAcquisitionCount => _retriedAcquisitions;
+
   /// Licences armed per reason, e.g. `{preload-warm: 3, playback: 1}`.
   static Map<String, int> get countsByReason => Map<String, int>.unmodifiable(_byReason);
 
@@ -144,7 +198,9 @@ class FastPixDrmLog {
 
   /// A one-line summary, for printing at the end of a run or a test.
   static String summary() {
-    if (_total == 0) return '$tag summary total=0 (none armed yet)';
+    if (_total == 0 && _acquired == 0) {
+      return '$tag summary total=0 (none armed yet)';
+    }
     final byReason = _byReason.entries
         .map((entry) => '${entry.key}=${entry.value}')
         .join(' ');
@@ -154,6 +210,9 @@ class FastPixDrmLog {
         .join(' ');
     return '$tag summary total=$_total $byReason'
         '${_reused == 0 ? '' : ' reused=$_reused'}'
+        '${_acquired == 0 ? '' : ' acquired=$_acquired'}'
+        '${_acquisitionFailures == 0 ? '' : ' failed=$_acquisitionFailures'}'
+        '${_retriedAcquisitions == 0 ? '' : ' retried=$_retriedAcquisitions'}'
         '${repeats.isEmpty ? '' : ' repeated: $repeats'}';
   }
 
@@ -170,5 +229,8 @@ class FastPixDrmLog {
     _byPlaybackId.clear();
     _total = 0;
     _reused = 0;
+    _acquired = 0;
+    _acquisitionFailures = 0;
+    _retriedAcquisitions = 0;
   }
 }

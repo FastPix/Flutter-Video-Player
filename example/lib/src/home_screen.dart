@@ -12,6 +12,9 @@ import 'widgets/poster_card.dart';
 import 'widgets/preload_badge.dart';
 import 'widgets/stream_form_sheet.dart';
 
+/// The row of streams the viewer has started, and the playlist opened from it.
+const String _continueWatching = 'Continue watching';
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -134,7 +137,12 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<void> _showStreamMenu(DemoStream stream) async {
+  /// The menu for [stream]. [fromContinueWatching] offers to take it off
+  /// that row, which leaves it in *On demand*.
+  Future<void> _showStreamMenu(
+    DemoStream stream, {
+    bool fromContinueWatching = false,
+  }) async {
     await showModalBottomSheet<void>(
       context: context,
       builder: (sheetContext) {
@@ -179,12 +187,25 @@ class _HomeScreenState extends State<HomeScreen> {
                   );
                 },
               ),
+              if (fromContinueWatching)
+                ListTile(
+                  leading: const Icon(Icons.history_toggle_off),
+                  title: const Text('Remove from Continue watching'),
+                  subtitle: const Text('Stays in On demand'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _catalog.removeFromContinueWatching(stream.playbackId);
+                  },
+                ),
+              // Deleting takes the video out of every row, On demand
+              // included, so it is asked about rather than done on one tap.
               ListTile(
                 leading: const Icon(Icons.delete_outline),
-                title: const Text('Remove from catalog'),
+                title: const Text('Delete from app'),
+                subtitle: const Text('Removes it from every row'),
                 onTap: () {
                   Navigator.pop(sheetContext);
-                  _catalog.remove(stream);
+                  _confirmDelete(stream);
                 },
               ),
             ],
@@ -192,6 +213,30 @@ class _HomeScreenState extends State<HomeScreen> {
         );
       },
     );
+  }
+
+  Future<void> _confirmDelete(DemoStream stream) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Delete "${stream.title}"?'),
+        content: const Text(
+          'It will be removed from On demand and Continue watching. You can '
+          'add it again with its playback ID.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed ?? false) _catalog.remove(stream);
   }
 
   @override
@@ -303,7 +348,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Stack(
           children: [
             AspectRatio(
-              aspectRatio: 16 / 10,
+              aspectRatio: 16 / 9,
               child: DecoratedBox(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
@@ -314,7 +359,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
             ),
-            // Scrim, so the title and buttons stay legible over any gradient.
+            // Scrim, so the title and buttons stay legible over the gradient.
             const Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -392,7 +437,12 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       const SizedBox(width: 10),
                       IconButton.filledTonal(
-                        onPressed: () => _showStreamMenu(stream),
+                        onPressed: () => _showStreamMenu(
+                          stream,
+                          fromContinueWatching: _catalog.isInContinueWatching(
+                            stream.playbackId,
+                          ),
+                        ),
                         icon: const Icon(Icons.more_horiz),
                       ),
                     ],
@@ -417,7 +467,10 @@ class _HomeScreenState extends State<HomeScreen> {
           stream: stream,
           gradientIndex: _catalog.indexOf(stream),
           onTap: () => _open(stream, items: items, title: title),
-          onLongPress: () => _showStreamMenu(stream),
+          onLongPress: () => _showStreamMenu(
+            stream,
+            fromContinueWatching: title == _continueWatching,
+          ),
         ),
         Positioned(
           top: 6,
@@ -433,11 +486,11 @@ class _HomeScreenState extends State<HomeScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         PosterRail(
-          title: 'Continue watching',
+          title: _continueWatching,
           children: _catalog.continueWatching
               .map((s) => card(s,
                   items: _catalog.continueWatching,
-                  title: 'Continue watching'))
+                  title: _continueWatching))
               .toList(),
         ),
         PosterRail(

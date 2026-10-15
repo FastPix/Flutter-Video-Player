@@ -26,6 +26,26 @@ void main() {
       await controller.dispose();
     });
 
+    test('the last item ending pauses the platform player', () async {
+      // On iOS the engine's AVPlayer keeps its rate at the end of the item,
+      // so iOS went on counting the app as playing and the lock screen said
+      // "playing" over a finished video.
+      final controller = FastPixPlayerController();
+      await PlayerTestHarness.load(controller, PlayerTestHarness.source('solo'));
+      await controller.play();
+      await PlayerTestHarness.settle();
+      platform.calls.clear();
+
+      await platform.emitCompleted(platform.created.last);
+      await PlayerTestHarness.settle();
+
+      expect(
+        platform.calls.where((c) => c.method == 'pause'),
+        isNotEmpty,
+      );
+      await controller.dispose();
+    });
+
     test('autoplay off leaves the playlist where it is', () async {
       final controller =
           await PlayerTestHarness.withPlaylist(PlayerTestHarness.playlist(3));

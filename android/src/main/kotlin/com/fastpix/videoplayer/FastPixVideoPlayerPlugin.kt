@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Rational
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
@@ -63,6 +64,13 @@ class FastPixVideoPlayerPlugin :
      */
     private var pipChannel: MethodChannel? = null
 
+    private var prerenderChannel: MethodChannel? = null
+
+    /** Each engine player's role, by textureId. Bookkeeping only: Android has no
+     *  native owner that could select a hidden player. */
+    private val prerenderRoles = mutableMapOf<Long, String>()
+    private var firstFrameDetector: FastPixFirstFrameDetector? = null
+
     private var activityBinding: ActivityPluginBinding? = null
     private var context: Context? = null
     private val main = Handler(Looper.getMainLooper())
@@ -75,6 +83,91 @@ class FastPixVideoPlayerPlugin :
      * after attaching should report only if the activity is genuinely in PiP.
      */
     private var lastReportedPip: Boolean? = null
+
+    /**
+     * Whether the host activity is started, tracked from its own callbacks.
+     *
+     * Tells a dismissed window from an expanded one: expanding brings the
+     * activity back to the front, dismissing leaves it stopped.
+     */
+    private var activityStarted = true
+
+    /**
+     * Whether leaving the app now should open a PiP window: Dart's answer to
+     * PiP enabled, automatic PiP on and a video playing, kept current as any of
+     * them changes.
+     *
+     * Held here because the decision cannot wait for Dart at the moment of
+     * leaving. Android allows entering PiP only between `onUserLeaveHint` and
+     * the activity stopping, which on some devices is 25ms — on a Xiaomi with
+     * HyperOS the activity was stopping before a hint relayed to Dart had even
+     * been read, so every automatic request was refused. Armed in advance, the
+     * system opens the window itself on Android 12+, and on older versions the
+     * request is made inside the hint.
+     */
+    private var autoPipArmed = false
+
+    /** A leave that asked for PiP, until a window opens or the app returns. */
+    private var autoPipOutstanding = false
+
+    /**
+     * The activity stopped after a leave that asked for PiP. If no window
+     * opened, Dart is told, or it would wait on a window that never comes and
+     * leave the video playing with nothing on screen.
+     */
+    private val autoPipRefusalCheck = Runnable {
+        if (!autoPipOutstanding) return@Runnable
+        autoPipOutstanding = false
+        if (activityStarted || isInPip()) return@Runnable
+        pipChannel?.invokeMethod(METHOD_AUTO_PIP_REFUSED, null)
+    }
+
+    /**
+     * Reads the PiP mode while a window is open.
+     *
+     * A plain `FlutterActivity` gives a plugin no PiP-mode callback, and on
+     * Android 12 the activity-scoped `registerComponentCallbacks` only sees
+     * application-wide configuration. Dismissing the window on such a device
+     * produced no callback at all — the activity was already stopped in the
+     * window — so the SDK never learned the window was gone and the audio
+     * behind it played on. Runs only while a window is open, and stops itself.
+     */
+    private val pipWatch: Runnable = Runnable {
+        reportPipState()
+        if (lastReportedPip == true) main.postDelayed(pipWatch, PIP_WATCH_INTERVAL_MS)
+    }
+
+    /** Until when [pipEntryWatch] keeps looking, in uptime milliseconds. */
+    private var pipEntryWatchUntil = 0L
+
+    /**
+     * Reads the PiP mode after a leave that may open a window, until it does.
+     *
+     * Automatic PiP on Android 12+ moves an already-paused activity into the
+     * window, and a plain `FlutterActivity` reports that to no plugin callback
+     * — on a moto g71 (Android 12) Dart learned of the window 5.7s late, and
+     * drew the whole page into the thumbnail meanwhile. Short-lived: stops at
+     * the first report of a window, or after [PIP_ENTRY_WATCH_MS].
+     */
+    private val pipEntryWatch: Runnable = Runnable {
+        reportPipState()
+        if (lastReportedPip == true) return@Runnable
+        if (SystemClock.uptimeMillis() >= pipEntryWatchUntil) return@Runnable
+        // By name: inside a lambda, `this` is the plugin, not the Runnable.
+        main.postDelayed(pipEntryWatch, PIP_ENTRY_WATCH_INTERVAL_MS)
+    }
+
+    private fun watchForPipEntry() {
+        pipEntryWatchUntil = SystemClock.uptimeMillis() + PIP_ENTRY_WATCH_MS
+        main.removeCallbacks(pipEntryWatch)
+        main.post(pipEntryWatch)
+    }
+
+    /** Sent once a closed window has had time to turn into a return to the app. */
+    private val dismissCheck = Runnable {
+        if (activityStarted || isInPip()) return@Runnable
+        pipChannel?.invokeMethod(METHOD_PIP_DISMISSED, null)
+    }
 
     /**
      * Entering and leaving PiP is a configuration change, so this is the
@@ -107,11 +200,45 @@ class FastPixVideoPlayerPlugin :
      * This is not a poll: both are platform callbacks.
      */
     private val activityCallbacks = object : Application.ActivityLifecycleCallbacks {
-        override fun onActivityResumed(activity: Activity) = reportPipState()
-        override fun onActivityPaused(activity: Activity) = reportPipState()
+        override fun onActivityResumed(activity: Activity) {
+            // Back without having left: a pause for a dialog, not a leave.
+            if (activity === activityBinding?.activity) autoPipOutstanding = false
+            reportPipState()
+        }
+        override fun onActivityPaused(activity: Activity) {
+            reportPipState()
+            // Armed, a pause is how automatic PiP begins; the window may only
+            // open after it, with no callback to say so.
+            if (autoPipArmed && activity === activityBinding?.activity) {
+                // Dart records the window as pending at this pause; if the
+                // activity then stops with no window, it is told.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    autoPipOutstanding = true
+                }
+                watchForPipEntry()
+            }
+        }
         override fun onActivityCreated(activity: Activity, bundle: Bundle?) = Unit
-        override fun onActivityStarted(activity: Activity) = Unit
-        override fun onActivityStopped(activity: Activity) = Unit
+        override fun onActivityStarted(activity: Activity) {
+            if (activity !== activityBinding?.activity) return
+            activityStarted = true
+            autoPipOutstanding = false
+        }
+        // Dismissing the window is the one way out of PiP that neither resumes
+        // nor pauses the activity — it was already paused while in the window
+        // and is only stopped — and on Android 12 it does not always arrive as
+        // a configuration change either. Unreported, the SDK went on believing
+        // the window was open and never paused the audio playing behind it.
+        override fun onActivityStopped(activity: Activity) {
+            if (activity === activityBinding?.activity) activityStarted = false
+            reportPipState()
+            if (autoPipOutstanding) {
+                // Settled first: on Android 11 and below a window can still be
+                // opening as the activity stops.
+                main.removeCallbacks(autoPipRefusalCheck)
+                main.postDelayed(autoPipRefusalCheck, PIP_DISMISS_SETTLE_MS)
+            }
+        }
         override fun onActivitySaveInstanceState(activity: Activity, bundle: Bundle) = Unit
         override fun onActivityDestroyed(activity: Activity) = Unit
     }
@@ -124,6 +251,15 @@ class FastPixVideoPlayerPlugin :
         pipChannel = MethodChannel(binding.binaryMessenger, PIP_CHANNEL).also {
             it.setMethodCallHandler(::onPipMethodCall)
         }
+        val prerender = MethodChannel(binding.binaryMessenger, PRERENDER_CHANNEL).also {
+            it.setMethodCallHandler(::onPrerenderMethodCall)
+        }
+        prerenderChannel = prerender
+        @Suppress("DEPRECATION")
+        val flutterEngine = binding.flutterEngine
+        firstFrameDetector = FastPixFirstFrameDetector({ flutterEngine }) { method, textureId ->
+            prerender.invokeMethod(method, mapOf("textureId" to textureId))
+        }
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -131,7 +267,44 @@ class FastPixVideoPlayerPlugin :
         lifecycleChannel = null
         pipChannel?.setMethodCallHandler(null)
         pipChannel = null
+        prerenderChannel?.setMethodCallHandler(null)
+        prerenderChannel = null
+        prerenderRoles.clear()
+        firstFrameDetector?.stopAll()
+        firstFrameDetector = null
         context = null
+    }
+
+    // MARK: - Prerender
+
+    /**
+     * Layer roles and the first-frame signal for prerendering. When the engine's
+     * players cannot be reached, a watch answers `unsupported` and Dart skips the
+     * prerender with `featureDisabled`, keeping the warm player.
+     */
+    private fun onPrerenderMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        val textureId = (call.argument<Any>("textureId") as? Number)?.toLong()
+        when (call.method) {
+            "isSupported" -> result.success(firstFrameDetector?.isSupported() == true)
+            "setRole" -> {
+                val role = call.argument<String>("role")
+                if (textureId != null && role != null) prerenderRoles[textureId] = role
+                result.success(null)
+            }
+            "stopWatching" -> {
+                if (textureId != null) firstFrameDetector?.stop(textureId)
+                result.success(null)
+            }
+            "watchFirstFrame" -> {
+                val positionMs = (call.argument<Any>("positionMs") as? Number)?.toLong() ?: 0L
+                val watching = textureId != null &&
+                    firstFrameDetector?.watch(textureId, positionMs) == true
+                result.success(if (watching) "ok" else "unsupported")
+            }
+            // iOS only: there is nothing to preroll on ExoPlayer.
+            "preroll" -> result.success(null)
+            else -> result.notImplemented()
+        }
     }
 
     // MARK: - ActivityAware
@@ -144,6 +317,10 @@ class FastPixVideoPlayerPlugin :
             ?.registerActivityLifecycleCallbacks(activityCallbacks)
         // Seed the baseline without reporting: attaching is not a transition.
         lastReportedPip = isInPip()
+        activityStarted = true
+        // Parameters belong to the activity, and a configuration change builds
+        // a new one.
+        if (autoPipArmed) applyAutoEnterParams()
     }
 
     // A configuration change tears the activity down and builds a new one, so
@@ -161,12 +338,57 @@ class FastPixVideoPlayerPlugin :
             ?.unregisterActivityLifecycleCallbacks(activityCallbacks)
         activityBinding = null
         lastReportedPip = null
+        main.removeCallbacks(pipWatch)
+        main.removeCallbacks(dismissCheck)
+        main.removeCallbacks(autoPipRefusalCheck)
+        main.removeCallbacks(pipEntryWatch)
     }
 
     override fun onUserLeaveHint() {
-        // Fire-and-forget: this is the last instant before the activity leaves
-        // the foreground, and waiting on a reply would spend it.
-        lifecycleChannel?.invokeMethod(METHOD_USER_LEAVE_HINT, null)
+        val pip = leaveWithPip()
+        // Fire-and-forget: Dart only records what happened, so the PiP decision
+        // above never waits on it.
+        lifecycleChannel?.invokeMethod(METHOD_USER_LEAVE_HINT, mapOf(ARG_PIP to pip))
+    }
+
+    /**
+     * Open a PiP window for this leave if Dart armed one, without a round trip.
+     *
+     * Android 12+ opens it itself from the parameters [applyAutoEnterParams]
+     * set; below that it has to be asked for here, inside the hint.
+     */
+    private fun leaveWithPip(): String {
+        if (!autoPipArmed) return LEAVE_PIP_NONE
+        if (isInPip()) return LEAVE_PIP_REQUESTED
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            autoPipOutstanding = true
+            return LEAVE_PIP_REQUESTED
+        }
+        if (enterPip(pipAspectWidth, pipAspectHeight) != ENTER_OK) {
+            return LEAVE_PIP_REFUSED
+        }
+        autoPipOutstanding = true
+        return LEAVE_PIP_REQUESTED
+    }
+
+    private fun setAutoEnterArmed(armed: Boolean) {
+        if (armed == autoPipArmed) return
+        autoPipArmed = armed
+        applyAutoEnterParams()
+    }
+
+    /** Hand Android 12+ the current auto-enter answer with the video's shape. */
+    private fun applyAutoEnterParams() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !isPipSupported()) return
+        val activity = activityBinding?.activity ?: return
+        try {
+            activity.setPictureInPictureParams(pipParams(pipAspectWidth, pipAspectHeight))
+        } catch (error: IllegalStateException) {
+            // The activity cannot take PiP parameters (not declared, or going
+            // away); the hint below still reports what happened.
+        } catch (error: IllegalArgumentException) {
+            // Unreachable with the clamp in pipParams.
+        }
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -190,13 +412,23 @@ class FastPixVideoPlayerPlugin :
             "isActive" -> result.success(isInPip())
             "exit" -> result.success(exitPip())
             "setAutoEnter" ->
-                // Recorded by Dart, not acted on here. Android's automatic PiP
-                // runs through `onUserLeaveHint` below, which is the only
-                // moment the platform allows it; there is no standing flag to
-                // set, unlike iOS. Answering the support question keeps the
-                // Dart call symmetrical across platforms.
+                // Recorded by Dart, not acted on here: what Android acts on is
+                // `setAutoEnterArmed`, which also knows whether a video is
+                // playing. Answering the support question keeps the Dart call
+                // symmetrical across platforms.
                 result.success(isPipSupported())
-            "setAspectRatio" -> result.success(null)
+            "setAutoEnterArmed" -> {
+                setAutoEnterArmed(call.argument<Boolean>(ARG_ARMED) == true)
+                result.success(isPipSupported())
+            }
+            "setEnabled" ->
+                // Recorded by Dart, not acted on here: Android enters PiP only
+                // when Dart asks, and Dart stops asking while it is disabled.
+                result.success(true)
+            "setAspectRatio" -> {
+                setPipAspect(call)
+                result.success(null)
+            }
             else -> result.notImplemented()
         }
     }
@@ -216,6 +448,62 @@ class FastPixVideoPlayerPlugin :
     }
 
     /**
+     * The video's shape, as Dart last reported it. Zero until a size is known.
+     *
+     * Kept here because `enter` carries no dimensions — automatic PiP enters
+     * from `onUserLeaveHint`, where there is no time to ask Dart for them — so
+     * without it every window opened at Android's default landscape shape and
+     * a vertical video played pillarboxed inside it.
+     */
+    private var pipAspectWidth = 0.0
+    private var pipAspectHeight = 0.0
+
+    /**
+     * Record the video's shape, and reshape a window that is already open —
+     * a playlist advancing from a landscape video to a vertical one mid-PiP.
+     */
+    private fun setPipAspect(call: MethodCall) {
+        val width = (call.argument<Number>(ARG_WIDTH))?.toDouble() ?: 0.0
+        val height = (call.argument<Number>(ARG_HEIGHT))?.toDouble() ?: 0.0
+        if (width <= 0 || height <= 0) return
+        pipAspectWidth = width
+        pipAspectHeight = height
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        // An armed activity holds parameters too, and the window Android 12+
+        // opens from them should have the video's shape.
+        val armedParams = autoPipArmed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+        if (!isInPip() && !armedParams) return
+        val activity = activityBinding?.activity ?: return
+        try {
+            activity.setPictureInPictureParams(pipParams(width, height))
+        } catch (error: IllegalStateException) {
+            // The window closed between the check and the call; the next
+            // entry picks the recorded shape up anyway.
+        } catch (error: IllegalArgumentException) {
+            // Unreachable with the clamp in pipParams, but a live window is
+            // not worth an activity crash over its shape.
+        }
+    }
+
+    @android.annotation.TargetApi(Build.VERSION_CODES.O)
+    private fun pipParams(width: Double, height: Double): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder()
+        if (width > 0 && height > 0) {
+            val ratio = (width / height).coerceIn(MIN_ASPECT, MAX_ASPECT)
+            // Scaled to integers because Rational takes them; 1000 keeps three
+            // decimal places, which is finer than the window can render.
+            builder.setAspectRatio(Rational((ratio * 1000).toInt(), 1000))
+        }
+        // Every set of parameters carries it: any `setPictureInPictureParams`
+        // replaces the last, and one without it would silently disarm.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setAutoEnterEnabled(autoPipArmed)
+        }
+        return builder.build()
+    }
+
+    /**
      * Enter PiP with the video's own shape.
      *
      * The aspect ratio comes from Dart because only Dart knows the video's
@@ -227,23 +515,22 @@ class FastPixVideoPlayerPlugin :
      * activity on an unusual source.
      */
     private fun enterPip(call: MethodCall): String {
+        // Dimensions on the call win; otherwise the shape last reported by
+        // `setAspectRatio`, which is what every current caller relies on.
+        val width = (call.argument<Number>(ARG_WIDTH))?.toDouble()
+            ?.takeIf { it > 0 } ?: pipAspectWidth
+        val height = (call.argument<Number>(ARG_HEIGHT))?.toDouble()
+            ?.takeIf { it > 0 } ?: pipAspectHeight
+        return enterPip(width, height)
+    }
+
+    private fun enterPip(width: Double, height: Double): String {
         val activity = activityBinding?.activity ?: return ENTER_UNSUPPORTED
         if (!isPipSupported()) return ENTER_UNSUPPORTED
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return ENTER_UNSUPPORTED
 
-        val width = (call.argument<Number>(ARG_WIDTH))?.toDouble() ?: 0.0
-        val height = (call.argument<Number>(ARG_HEIGHT))?.toDouble() ?: 0.0
-
-        val builder = PictureInPictureParams.Builder()
-        if (width > 0 && height > 0) {
-            val ratio = (width / height).coerceIn(MIN_ASPECT, MAX_ASPECT)
-            // Scaled to integers because Rational takes them; 1000 keeps three
-            // decimal places, which is finer than the window can render.
-            builder.setAspectRatio(Rational((ratio * 1000).toInt(), 1000))
-        }
-
         return try {
-            if (activity.enterPictureInPictureMode(builder.build())) {
+            if (activity.enterPictureInPictureMode(pipParams(width, height))) {
                 ENTER_OK
             } else {
                 ENTER_FAILED
@@ -280,8 +567,17 @@ class FastPixVideoPlayerPlugin :
     /** Report a genuine transition, and only a transition. */
     private fun reportPipState() {
         val active = isInPip()
+        if (active) autoPipOutstanding = false
         if (active == lastReportedPip) return
+        val wasActive = lastReportedPip == true
         lastReportedPip = active
+        main.removeCallbacks(pipWatch)
+        main.removeCallbacks(dismissCheck)
+        if (active) {
+            main.postDelayed(pipWatch, PIP_WATCH_INTERVAL_MS)
+        } else if (wasActive) {
+            main.postDelayed(dismissCheck, PIP_DISMISS_SETTLE_MS)
+        }
         main.post {
             pipChannel?.invokeMethod(
                 METHOD_PIP_STATE_CHANGED,
@@ -337,13 +633,28 @@ class FastPixVideoPlayerPlugin :
         const val CHANNEL = "fastpix_video_player/precache"
         const val LIFECYCLE_CHANNEL = "fastpix_video_player/lifecycle"
         const val PIP_CHANNEL = "fastpix_video_player/pip"
+        const val PRERENDER_CHANNEL = "fastpix_video_player/prerender"
         const val METHOD_WARM_MANIFEST = "warmManifest"
         const val METHOD_USER_LEAVE_HINT = "onUserLeaveHint"
         const val METHOD_PIP_STATE_CHANGED = "pipStateChanged"
+        const val METHOD_PIP_DISMISSED = "pipDismissed"
+        const val METHOD_AUTO_PIP_REFUSED = "autoPipRefused"
+        const val PIP_WATCH_INTERVAL_MS = 500L
+        const val PIP_DISMISS_SETTLE_MS = 400L
+        const val PIP_ENTRY_WATCH_INTERVAL_MS = 50L
+        const val PIP_ENTRY_WATCH_MS = 3000L
 
         const val ARG_WIDTH = "width"
         const val ARG_HEIGHT = "height"
         const val ARG_ACTIVE = "active"
+        const val ARG_ARMED = "armed"
+        const val ARG_PIP = "pip"
+
+        // What a leave did about PiP, carried on the hint. Mirrored in
+        // FastPixUserLeaveHint.
+        const val LEAVE_PIP_NONE = "none"
+        const val LEAVE_PIP_REQUESTED = "requested"
+        const val LEAVE_PIP_REFUSED = "refused"
 
         // Answers to "enter", so one round trip carries both the outcome and
         // the reason. See FastPixPipChannel.enter for why the count matters.

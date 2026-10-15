@@ -35,6 +35,22 @@ class Catalog extends ChangeNotifier {
   /// you left it.
   final Map<String, StreamProgress> _progress = <String, StreamProgress>{};
 
+  /// Playback IDs the viewer deleted, so the seed does not bring them back.
+  ///
+  /// The seed is re-read on every launch, and without this a seeded stream
+  /// the viewer deleted reappeared the next time the app opened.
+  final Set<String> _removedIds = <String>{};
+
+  /// The credentials the seed last applied to each stream, by playback ID.
+  ///
+  /// Seeding runs on every launch, and it used to copy the seed's token,
+  /// licence token and hosts over the stored ones every time — so a token
+  /// edited in the app was the seed's again the next time the app opened.
+  /// With this record a launch applies only what the seed has *changed* since
+  /// it last applied it: an edit survives, and a refreshed seed file still
+  /// reaches a stream saved with yesterday's token.
+  final Map<String, SeedCredentials> _seedApplied = <String, SeedCredentials>{};
+
   File? _file;
 
   /// Read the saved catalog. Safe to call more than once.
@@ -67,6 +83,13 @@ class Catalog extends ChangeNotifier {
       _progress
         ..clear()
         ..addAll(StreamProgress.decodeAll(decoded['progress']));
+      _removedIds
+        ..clear()
+        ..addAll((decoded['removed'] as List<dynamic>? ?? const [])
+            .whereType<String>());
+      _seedApplied
+        ..clear()
+        ..addAll(SeedCredentials.decodeAll(decoded['seedApplied']));
       notifyListeners();
     } catch (_) {
       // An unreadable store is an empty catalog, never a failed launch.
@@ -77,29 +100,118 @@ class Catalog extends ChangeNotifier {
 
   /// Populate from the seed.
   ///
-  /// Normally this only ever fills an *empty* catalog, so a stream the viewer
-  /// edited or deleted is never resurrected on the next launch.
-  ///
-  /// Local overrides — `assets/local/streams.txt` or the run command — are the
-  /// exception and replace what was stored. They carry tokens, tokens expire,
-  /// and a stored copy of yesterday's token would otherwise win by having got
-  /// there first: the app would keep failing on a credential the file had
-  /// already fixed.
+  /// An empty catalog is filled from it. A stored one is only *merged* with
+  /// it, and only when local overrides are present — see [mergeSeed].
   Future<void> _seed() async {
     // Loaded before the decision, because whether a local file exists is only
     // knowable after reading the bundle.
     final seeded = await DemoSeed.load();
     _logSeed(seeded);
 
-    final overridden = DemoSeed.hasCommandLineIds || DemoSeed.hasLocalOverrides;
-    if (_streams.isNotEmpty && !overridden) return;
-    if (seeded.isEmpty) return;
+    final merged = mergeSeed(
+      stored: _streams,
+      seeded: seeded,
+      removed: _removedIds,
+      overridden: DemoSeed.hasCommandLineIds || DemoSeed.hasLocalOverrides,
+      applied: _seedApplied,
+    );
+    if (merged == null) return;
 
     _streams
       ..clear()
-      ..addAll(seeded);
+      ..addAll(merged);
+    // What the seed says now is what the next launch compares against.
+    for (final stream in seeded) {
+      _seedApplied[stream.playbackId] = SeedCredentials.of(stream);
+    }
     _persist();
     notifyListeners();
+  }
+
+  /// The catalog after launch-time seeding, or null to leave it as stored.
+  ///
+  /// - An empty catalog takes the whole seed, less anything the viewer
+  ///   deleted.
+  /// - A stored catalog is left alone unless local overrides are present.
+  /// - With overrides, the stored catalog is kept — in its own order, with the
+  ///   streams the viewer added and without the ones they deleted. A seeded
+  ///   stream it already holds takes those of the seed's credentials and hosts
+  ///   that differ from what [applied] says the seed last gave it, and a
+  ///   seeded stream it has never held is appended.
+  ///
+  /// [applied] is what the seed last put on each stream. A value the seed
+  /// still carries unchanged is not applied again, so a token edited in the
+  /// app since is kept; a value it has changed is applied. A stream with no
+  /// record takes every value the seed has, as it always did.
+  ///
+  /// Overrides used to *replace* the stored catalog outright. They carry
+  /// tokens, tokens expire, and a stored copy of yesterday's token must not
+  /// win by having got there first — but replacing everything to refresh a
+  /// token also discarded every stream added in the app and resurrected every
+  /// one deleted, on every launch. Refreshing credentials is all the override
+  /// needs to do.
+  @visibleForTesting
+  static List<DemoStream>? mergeSeed({
+    required List<DemoStream> stored,
+    required List<DemoStream> seeded,
+    required Set<String> removed,
+    required bool overridden,
+    Map<String, SeedCredentials> applied = const <String, SeedCredentials>{},
+  }) {
+    final wanted = seeded
+        .where((stream) => !removed.contains(stream.playbackId))
+        .toList();
+
+    if (stored.isEmpty) return wanted.isEmpty ? null : wanted;
+    if (!overridden || wanted.isEmpty) return null;
+
+    final byId = <String, DemoStream>{
+      for (final stream in wanted) stream.playbackId: stream,
+    };
+    final merged = <DemoStream>[
+      for (final stream in stored)
+        byId.containsKey(stream.playbackId)
+            ? _withSeedCredentials(
+                stream,
+                byId[stream.playbackId]!,
+                applied[stream.playbackId],
+              )
+            : stream,
+    ];
+    final storedIds = {for (final stream in stored) stream.playbackId};
+    merged.addAll(
+      wanted.where((stream) => !storedIds.contains(stream.playbackId)),
+    );
+    return merged;
+  }
+
+  /// [stored] with [seed]'s tokens and hosts, keeping what the viewer edited.
+  ///
+  /// A field the seed leaves blank keeps the stored value rather than
+  /// clearing it, and so does a field the seed carries unchanged since
+  /// [previous] — the value it last applied — because the stored value may be
+  /// the viewer's edit of it. With no [previous], every value the seed has is
+  /// applied.
+  static DemoStream _withSeedCredentials(
+    DemoStream stored,
+    DemoStream seed,
+    SeedCredentials? previous,
+  ) {
+    // Null leaves the stored field as it is.
+    String? changed(String? now, String? before) =>
+        previous != null && now == before ? null : now;
+    final drmToken = changed(seed.drmToken, previous?.drmToken);
+    return stored.copyWith(
+      token: changed(seed.token, previous?.token),
+      drmToken: drmToken,
+      streamHost: changed(seed.streamHost, previous?.streamHost),
+      drmHost: changed(seed.drmHost, previous?.drmHost),
+      // Only ever switched on: the seed's DRM flag follows its licence token,
+      // and a seed line without one says nothing about the stored stream.
+      // Switched on only with a licence token it is applying, so DRM switched
+      // off in the app stays off while the seed is unchanged.
+      drmEnabled: seed.drmEnabled && drmToken != null ? true : null,
+    );
   }
 
   /// Say what was seeded, once, at launch.
@@ -136,6 +248,11 @@ class Catalog extends ChangeNotifier {
         jsonEncode(<String, dynamic>{
           'streams': _streams.map((stream) => stream.toJson()).toList(),
           'recent': _recentIds,
+          'removed': _removedIds.toList(),
+          'seedApplied': <String, dynamic>{
+            for (final entry in _seedApplied.entries)
+              entry.key: entry.value.toJson(),
+          },
           'progress': <String, dynamic>{
             for (final entry in _progress.entries)
               entry.key: entry.value.toJson(),
@@ -188,6 +305,8 @@ class Catalog extends ChangeNotifier {
     } else {
       _streams.add(stream);
     }
+    // Adding a stream back undoes deleting it.
+    _removedIds.remove(stream.playbackId);
     _persist();
     notifyListeners();
   }
@@ -198,9 +317,28 @@ class Catalog extends ChangeNotifier {
     );
     _recentIds.remove(stream.playbackId);
     _progress.remove(stream.playbackId);
+    _removedIds.add(stream.playbackId);
     _persist();
     notifyListeners();
   }
+
+  /// Take [playbackId] off *Continue watching*, and forget where it had
+  /// reached, while leaving it in the catalog — and so in *On demand*.
+  ///
+  /// The two rows answer different questions: *On demand* is what the app
+  /// has, *Continue watching* is what the viewer has been watching. Clearing
+  /// your history must not delete the video; that is [remove].
+  void removeFromContinueWatching(String playbackId) {
+    final removed = _recentIds.remove(playbackId);
+    final forgotten = _progress.remove(playbackId) != null;
+    if (!removed && !forgotten) return;
+    _persist();
+    notifyListeners();
+  }
+
+  /// Whether [playbackId] is on *Continue watching*.
+  bool isInContinueWatching(String playbackId) =>
+      _recentIds.contains(playbackId);
 
   void markWatched(DemoStream stream) => markWatchedId(stream.playbackId);
 
@@ -329,5 +467,58 @@ class StreamProgress {
       );
     }
     return result;
+  }
+}
+
+/// The credentials the seed last put on a stream: what launch-time seeding
+/// compares the seed against, so that it applies only what the seed *changed*.
+///
+/// Without it every launch copied the seed's credentials over the stored
+/// ones, and a token the viewer had edited in the app was back to the seed's
+/// the next time the app opened. Only the credential fields are recorded,
+/// because only they are taken from the seed.
+@immutable
+class SeedCredentials {
+  const SeedCredentials({
+    this.token,
+    this.drmToken,
+    this.streamHost,
+    this.drmHost,
+  });
+
+  /// The credentials [stream] carries.
+  SeedCredentials.of(DemoStream stream)
+    : token = stream.token,
+      drmToken = stream.drmToken,
+      streamHost = stream.streamHost,
+      drmHost = stream.drmHost;
+
+  final String? token;
+  final String? drmToken;
+  final String? streamHost;
+  final String? drmHost;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'token': token,
+    'drmToken': drmToken,
+    'streamHost': streamHost,
+    'drmHost': drmHost,
+  };
+
+  /// Rebuild the whole map, skipping anything unreadable so one bad entry
+  /// cannot stop the catalogue loading.
+  static Map<String, SeedCredentials> decodeAll(Object? decoded) {
+    if (decoded is! Map) return <String, SeedCredentials>{};
+    String? text(Object? value) => value is String ? value : null;
+    return <String, SeedCredentials>{
+      for (final entry in decoded.entries)
+        if (entry.key is String && entry.value is Map)
+          entry.key as String: SeedCredentials(
+            token: text((entry.value as Map)['token']),
+            drmToken: text((entry.value as Map)['drmToken']),
+            streamHost: text((entry.value as Map)['streamHost']),
+            drmHost: text((entry.value as Map)['drmHost']),
+          ),
+    };
   }
 }

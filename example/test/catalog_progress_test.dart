@@ -50,6 +50,41 @@ void main() {
     });
   });
 
+  group('removing from Continue watching', () {
+    test('takes it off that row but leaves it in On demand', () {
+      catalog.markWatchedId('second');
+      catalog.removeFromContinueWatching('second');
+
+      expect(catalog.continueWatching.map((s) => s.playbackId),
+          isNot(contains('second')));
+      expect(catalog.onDemand.map((s) => s.playbackId), contains('second'));
+      expect(catalog.isInContinueWatching('second'), isFalse);
+    });
+
+    test('forgets where it had reached, so it plays from the start', () {
+      catalog.markWatchedId('second');
+      catalog.recordProgress(
+        'second',
+        const Duration(minutes: 3),
+        const Duration(minutes: 12),
+      );
+      catalog.removeFromContinueWatching('second');
+
+      expect(catalog.progressOf('second'), isNull);
+      expect(catalog.resumePositionOf('second'), isNull);
+    });
+
+    test('deleting still removes it from every row', () {
+      catalog.markWatchedId('second');
+      catalog.remove(stream('second'));
+
+      expect(catalog.continueWatching.map((s) => s.playbackId),
+          isNot(contains('second')));
+      expect(catalog.onDemand.map((s) => s.playbackId),
+          isNot(contains('second')));
+    });
+  });
+
   group('recording progress', () {
     test('is readable back, with its fraction and remaining time', () {
       catalog.recordProgress(

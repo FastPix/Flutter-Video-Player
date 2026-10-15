@@ -7,9 +7,11 @@ import 'package:flutter/services.dart';
 import 'cast_service.dart';
 import 'custom_ui/fastpix_custom_controls.dart';
 import 'playback_config.dart';
+import 'widgets/pip_switch.dart';
 import 'widgets/precache_panel.dart';
 import 'widgets/playlist_rail.dart';
 import 'widgets/preload_badge.dart';
+import 'widgets/prerender_panel.dart';
 import 'catalog.dart';
 import 'models/demo_stream.dart';
 import 'theme.dart';
@@ -51,10 +53,10 @@ class WatchScreen extends StatefulWidget {
   /// Where in the *first* item to pick up, when the viewer is returning to
   /// something they had already started. Null starts at the beginning.
   ///
-  /// Applied as a seek once the engine reports a duration, not through
-  /// `FastPixPlayerDataSource.startAt`: that field is part of the preload
-  /// fingerprint, so setting it would refuse the warmed player this screen
-  /// exists to demonstrate.
+  /// Passed as that item's `FastPixPlayerDataSource.startAt`, so the player
+  /// is positioned there before it starts and the opening seconds never
+  /// show. A warmed player is still adopted: the start position is not part
+  /// of the preload fingerprint.
   final Duration? resumeFrom;
 
   @override
@@ -94,19 +96,33 @@ class _WatchScreenState extends State<WatchScreen>
   /// Put the device into the presentation this screen's fullscreen state asks
   /// for. Idempotent, so it can be re-asserted freely.
   void _applyPresentation() {
+    // Fullscreen follows the video, as YouTube does: a vertical video stays
+    // portrait and fills the screen, and only a landscape one rotates. Before
+    // the video has reported a size both read 0, which is landscape — the
+    // shape nearly everything is.
+    final portrait =
+        _controller.videoSourceHeight() > _controller.videoSourceWidth();
+
     // Native first: this is the answer iOS uses at presentation time, and it
     // has to be in place *before* the app leaves, not after it comes back.
     _orientationChannel
-        .invokeMethod<void>('set', {'fullscreen': _appFullscreen})
+        .invokeMethod<void>('set', {
+          'fullscreen': _appFullscreen,
+          'portrait': portrait,
+        })
         .catchError((Object error) {
       debugPrint('[FastPixOrientation] native call FAILED: $error');
     });
 
     if (_appFullscreen) {
-      SystemChrome.setPreferredOrientations(const [
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
+      SystemChrome.setPreferredOrientations(
+        portrait
+            ? const [DeviceOrientation.portraitUp]
+            : const [
+                DeviceOrientation.landscapeLeft,
+                DeviceOrientation.landscapeRight,
+              ],
+      );
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     } else {
       SystemChrome.setPreferredOrientations(
@@ -144,13 +160,118 @@ class _WatchScreenState extends State<WatchScreen>
 
   bool _loading = true;
 
-  /// Watches playback so the catalogue can remember where the viewer got to,
-  /// and so a resume can be applied the moment a duration exists.
-  StreamSubscription<FastPixPlaybackState>? _playbackSubscription;
+  /// The latest playback snapshot, read by [_showsLoader].
+  late FastPixPlaybackState _playback = _controller.playbackState;
 
-  /// Where to pick up in the current item, until it has been applied. Cleared
-  /// once the seek has happened, so it is a one-shot.
-  Duration? _pendingResume;
+  /// Whether the source now loading has yet to draw its first frame.
+  ///
+  /// The engine reports a source ready before its first frame arrives, and on
+  /// iOS it reports no buffering for that wait: the buffer was empty from the
+  /// start, so it never *became* empty. On a slow network that is seconds of
+  /// black, so the screen marks the wait itself — over once the playhead
+  /// moves.
+  bool _awaitingPicture = true;
+
+  /// Where the playhead stood when playback first started for this source.
+  Duration? _pictureStartPosition;
+
+  /// The source [_awaitingPicture] was armed for, so an automatic advance
+  /// re-arms it and an unrelated playlist update does not.
+  String? _pictureFor;
+
+  /// Where the playhead stood when the engine reported buffering, or null
+  /// while it reports none.
+  Duration? _bufferingAt;
+
+  /// Whether playback is stalled: reported buffering, with the playhead still
+  /// where it was then.
+  ///
+  /// The report alone is not trusted. On iOS the engine sends "buffering
+  /// started" whenever the buffer's empty flag changes — including when the
+  /// buffer fills — so it can arrive after "buffering ended" and leave
+  /// `isBuffering` true over a video that is playing. A playhead that moves
+  /// is proof it is not stalled.
+  bool _stalled = false;
+
+  /// A loader instead of a black box: while a source loads, while it waits
+  /// for its first frame, and while playback stalls. Never over a paused
+  /// video: nothing is being waited for. And never over a moving picture,
+  /// whatever else is pending: a video that is visibly playing is not
+  /// loading.
+  bool get _showsLoader =>
+      !_videoMoving &&
+      (_loading ||
+          (_wantsPlayback && (_stalled || _awaitingPicture)));
+
+  /// How long after the playhead last advanced the picture still counts as
+  /// moving. The engine reports the position about every 0.6 s, so a playing
+  /// video advances well within this; a stall stops advancing and gets its
+  /// loader once it runs out.
+  static const Duration _movingWindow = Duration(seconds: 1);
+
+  /// A forward jump larger than this between two reports is a seek, not
+  /// playback.
+  static const Duration _seekJump = Duration(seconds: 2);
+
+  /// When the playhead last advanced through playback, and where it was at
+  /// the last report.
+  DateTime? _advancedAt;
+  Duration? _reportedPosition;
+
+  /// Re-evaluates the loader once the moving window runs out with no new
+  /// report: a stall sends none.
+  Timer? _movingExpiry;
+
+  bool get _videoMoving {
+    final at = _advancedAt;
+    return at != null && DateTime.now().difference(at) < _movingWindow;
+  }
+
+  /// Whether this item has started playing, or the viewer paused it, since
+  /// it became active. Until then it is starting up.
+  bool _startedThisItem = false;
+
+  /// Whether playback is wanted: the item is starting up, or it is playing.
+  ///
+  /// A new engine player reports not playing until it starts, so the player's
+  /// flag alone would hide the loader for the whole startup delay after Next
+  /// or an automatic advance. Once the item has started, or the viewer
+  /// paused, the player's flag decides — no loader over a paused video.
+  bool get _wantsPlayback => !_startedThisItem || _playback.isPlaying;
+
+  /// Forget the playhead's motion and whether the item started: what moves
+  /// next belongs to a new load.
+  void _forgetMotion() {
+    _advancedAt = null;
+    _reportedPosition = null;
+    _movingExpiry?.cancel();
+    _startedThisItem = false;
+  }
+
+  /// Record whether [state] shows the playhead advancing through playback.
+  void _trackMotion(FastPixPlaybackState state) {
+    final previous = _reportedPosition;
+    _reportedPosition = state.position;
+    if (!state.isPlaying || previous == null) return;
+    final step = state.position - previous;
+    if (step <= Duration.zero || step > _seekJump) return;
+    _advancedAt = DateTime.now();
+    _movingExpiry?.cancel();
+    _movingExpiry = Timer(_movingWindow, () {
+      if (mounted) setState(() {});
+    });
+  }
+
+  /// Mark a load as started, and its first frame as not yet drawn.
+  void _startLoading() {
+    _loading = true;
+    _awaitingPicture = true;
+    _pictureStartPosition = null;
+    _forgetMotion();
+  }
+
+  /// Watches playback so the catalogue can remember where the viewer got to.
+  StreamSubscription<FastPixPlaybackState>? _playbackSubscription;
 
   /// When the catalogue was last told where playback had reached. Progress is
   /// written on a throttle: the tick fires several times a second and each
@@ -213,7 +334,9 @@ class _WatchScreenState extends State<WatchScreen>
     // than staying silent if it cannot. Because PiP is entered through the
     // SDK's own manager (never the engine's built-in button), the
     // `isPipActiveOrPending` guard protects it on Android — no auto-pause.
-    _controller.pip.autoEnterOnBackground = true;
+    // Unless the "Picture-in-Picture" switch is off, which turns off PiP
+    // entirely, automatic PiP included.
+    applyDemoPip(_controller);
     // The player publishes a snapshot on every change of the active item —
     // an automatic advance included — so this is the whole of the screen's
     // playlist bookkeeping.
@@ -221,9 +344,16 @@ class _WatchScreenState extends State<WatchScreen>
       if (!mounted) return;
       final playbackId = state.item?.playbackId;
       if (playbackId != null) Catalog.instance.markWatchedId(playbackId);
+      if (playbackId != _pictureFor) {
+        _pictureFor = playbackId;
+        // A prerendered item's picture is on screen as the switch happens:
+        // there is nothing to wait for, so no loader over it.
+        _awaitingPicture = !_preparedBeneath(playbackId);
+        _pictureStartPosition = null;
+        _forgetMotion();
+      }
       setState(() {});
     });
-    _pendingResume = widget.resumeFrom;
     _playbackSubscription = _controller.playbackStateStream.listen(
       _onPlaybackState,
     );
@@ -234,32 +364,53 @@ class _WatchScreenState extends State<WatchScreen>
       _onPipChanged,
     );
     _controller.addGlobalListener(_onPlayerEvent);
+    _controller.addEventListener(
+      FastPixPlayerEventTypes.ready,
+      _onSourceReady,
+    );
     // The demo rolls on by default, as it did before this moved into the SDK.
     _controller.autoPlayNext = true;
     _load();
   }
 
-  /// Apply a pending resume, then record progress on a throttle.
-  ///
-  /// The resume waits for a duration rather than firing straight after the
-  /// load: the engine reports one only once it actually has the media, and
-  /// seeking before then throws. This is the same "wait for the value to
-  /// arrive, then do the work once" latch the SDK uses for track readiness and
-  /// skip-segment validation.
+  /// Record progress on a throttle.
   void _onPlaybackState(FastPixPlaybackState state) {
-    if (!mounted || state.duration <= Duration.zero) return;
-
-    final resume = _pendingResume;
-    if (resume != null) {
-      _pendingResume = null;
-      if (resume < state.duration) unawaited(_controller.seekTo(resume));
-      return;
-    }
+    if (!mounted) return;
+    _trackLoader(state);
+    if (state.duration <= Duration.zero) return;
 
     final now = DateTime.now();
     if (now.difference(_lastProgressWrite) < _progressInterval) return;
     _lastProgressWrite = now;
     _recordProgress(state.position, state.duration);
+  }
+
+  /// Keep [_showsLoader] current, rebuilding only when it flips: the tick
+  /// fires several times a second.
+  void _trackLoader(FastPixPlaybackState state) {
+    final wasShowing = _showsLoader;
+    _playback = state;
+    if (state.isPlaying) _startedThisItem = true;
+    _trackMotion(state);
+    if (!state.isBuffering) {
+      _bufferingAt = null;
+      _stalled = false;
+    } else if (_bufferingAt == null) {
+      _bufferingAt = state.position;
+      _stalled = true;
+    } else if (state.position != _bufferingAt) {
+      _stalled = false;
+    }
+    // Not gated on `isBuffering`, which can stay true over a playing video.
+    if (_awaitingPicture && state.isPlaying) {
+      final start = _pictureStartPosition;
+      if (start == null) {
+        _pictureStartPosition = state.position;
+      } else if (state.position != start) {
+        _awaitingPicture = false;
+      }
+    }
+    if (_showsLoader != wasShowing) setState(() {});
   }
 
   /// Remember where the viewer is in whatever is playing now.
@@ -270,6 +421,13 @@ class _WatchScreenState extends State<WatchScreen>
   }
 
   void _onPlayerEvent(FastPixPlayerEvent event) {
+    // A pause before the item started — the viewer's, or autoplay held — ends
+    // its startup: no loader over a video that is not meant to play.
+    if (event.type == FastPixPlayerEventTypes.pause && !_startedThisItem) {
+      final wasShowing = _showsLoader;
+      _startedThisItem = true;
+      if (mounted && _showsLoader != wasShowing) setState(() {});
+    }
     // A finished item has no position worth returning to, so it offers a fresh
     // play next time rather than resuming at the credits. The playback ID comes
     // off the event itself — every event now carries the item it describes,
@@ -299,11 +457,15 @@ class _WatchScreenState extends State<WatchScreen>
   /// were measured on device, that the window covers both directions and is
   /// declared only after the new item has loaded.
   Future<void> _load() async {
-    setState(() => _loading = true);
+    setState(_startLoading);
     try {
       await _controller.setPlaylist(
         <FastPixPlayerDataSource>[
-          for (final stream in widget.items) stream.toDataSource(),
+          for (final (index, stream) in widget.items.indexed)
+            stream.toDataSource(
+              // Only the item the viewer is returning to picks up part-way.
+              startAt: index == widget.startIndex ? widget.resumeFrom : null,
+            ),
         ],
         startIndex: widget.startIndex,
         // workSpaceId / viewerId / beaconUrl feed the FastPix metrics SDK.
@@ -325,17 +487,40 @@ class _WatchScreenState extends State<WatchScreen>
   Future<void> _reload() async {
     final current = _current;
     if (current == null) return;
-    setState(() => _loading = true);
+    setState(_startLoading);
     await _controller.loadPlaybackId(current);
     if (mounted) setState(() => _loading = false);
   }
 
   Future<void> _goTo(int index) async {
-    // Moving deliberately means the resume no longer applies.
-    _pendingResume = null;
-    setState(() => _loading = true);
+    // A prepared item shows at once; its picture wait is skipped by the
+    // playlist listener.
+    if (!_preparedBeneath(_controller.playlistItemAt(index)?.playbackId)) {
+      setState(_startLoading);
+    }
     await _controller.jumpTo(index);
     if (mounted) setState(() => _loading = false);
+  }
+
+  /// Whether [playbackId]'s first frame is already prepared beneath the
+  /// active video, so moving to it shows its picture at once.
+  bool _preparedBeneath(String? playbackId) =>
+      playbackId != null &&
+      _controller.prerenderStatusOf(playbackId) ==
+          FastPixPrerenderStatus.frameReady;
+
+  /// The item was expected to start from its prerender, but loaded the
+  /// normal way — the prerender was dropped first, when PiP or Cast
+  /// started, say — so its picture is owed a loader again. A promotion fires
+  /// ready while its prerender still reads frameReady.
+  void _onSourceReady(FastPixPlayerEvent event) {
+    if (!mounted || _awaitingPicture) return;
+    if (_controller.dataSource?.playbackId != _pictureFor) return;
+    if (_preparedBeneath(_pictureFor)) return;
+    setState(() {
+      _awaitingPicture = true;
+      _pictureStartPosition = null;
+    });
   }
 
   void _snack(String message) {
@@ -364,6 +549,7 @@ class _WatchScreenState extends State<WatchScreen>
 
   @override
   void dispose() {
+    _movingExpiry?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _cast.removeListener(_attachCastWhenReady);
     // Leave the device the way we found it if we exit while still fullscreen.
@@ -397,6 +583,10 @@ class _WatchScreenState extends State<WatchScreen>
       _onPipChanged,
     );
     _controller.removeGlobalListener(_onPlayerEvent);
+    _controller.removeEventListener(
+      FastPixPlayerEventTypes.ready,
+      _onSourceReady,
+    );
     _controller.dispose();
     super.dispose();
   }
@@ -452,12 +642,17 @@ class _WatchScreenState extends State<WatchScreen>
       return ColoredBox(
         color: Colors.black,
         child: Center(
-          child: FastPixVideoSurface(key: _surfaceKey, controller: _controller),
+          child: FastPixVideoSurface(
+            key: _surfaceKey,
+            controller: _controller,
+            matchVideoAspectRatio: true,
+          ),
         ),
       );
     }
 
-    // App-owned fullscreen: fill the (now landscape) screen with the video and
+    // App-owned fullscreen: fill the screen — landscape, or portrait for a
+    // vertical video — with the video and
     // stack the controls over it. No app bar, no engine route — so a PiP
     // session entered from here keeps this layout on return.
     if (_appFullscreen) {
@@ -482,9 +677,11 @@ class _WatchScreenState extends State<WatchScreen>
                         child: FastPixVideoSurface(
                           key: _surfaceKey,
                           controller: _controller,
+                          matchVideoAspectRatio: true,
                         ),
                       ),
                       Positioned.fill(child: _buildControls()),
+                      if (_showsLoader) _buildLoader(),
                     ],
                   ),
                 ),
@@ -508,6 +705,8 @@ class _WatchScreenState extends State<WatchScreen>
               SliverToBoxAdapter(child: _buildStage(isCasting)),
               SliverToBoxAdapter(child: _buildMeta(isCasting)),
               SliverToBoxAdapter(child: _buildActions()),
+              SliverToBoxAdapter(child: PipSwitch(controller: _controller)),
+              SliverToBoxAdapter(child: _buildPrerenderPanel()),
               SliverToBoxAdapter(child: _buildUpNext()),
               SliverToBoxAdapter(child: _buildDetails()),
             ],
@@ -523,9 +722,22 @@ class _WatchScreenState extends State<WatchScreen>
         controller: _controller,
         isFullscreen: _appFullscreen,
         onToggleFullscreen: _toggleFullscreen,
+        // The back button sits over the top-left of the inline player only;
+        // 48 is its IconButton's tap target.
+        leadingInset: _appFullscreen ? 0 : 48,
         // The cast glyph opens the app's device picker rather than a bare
         // toggle, matching the richer cast overlay this screen shows.
         onCastPressed: _pickDevice,
+      );
+
+  /// Drawn over the controls, but lets taps through to them: the viewer can
+  /// still pause, seek or leave while a video loads.
+  Widget _buildLoader() => const Positioned.fill(
+        child: IgnorePointer(
+          child: Center(
+            child: CircularProgressIndicator(color: AppColors.accent),
+          ),
+        ),
       );
 
   /// The video area, plus the back button overlaid on it.
@@ -536,9 +748,12 @@ class _WatchScreenState extends State<WatchScreen>
           color: Colors.black,
           child: SafeArea(
             bottom: false,
-            // No aspect ratio pinned here: the surface sizes itself to the
-            // video, so a vertical source fills a portrait box instead of
-            // being letterboxed inside a landscape one. The Stack takes its
+            // No aspect ratio pinned here: `matchVideoAspectRatio` sizes the
+            // surface to the video once it reports its size (16:9 until then),
+            // so a vertical source fills a portrait box instead of being
+            // letterboxed inside a landscape one. The height cap keeps a 9:16
+            // video from pushing the rest of the page off screen; the box then
+            // narrows and centres rather than cropping. The Stack takes its
             // size from whichever child is showing — the player, or the cast
             // stage while casting, which has no video to measure.
             child: Stack(
@@ -553,24 +768,27 @@ class _WatchScreenState extends State<WatchScreen>
                   // The headless surface with the app-drawn transport stacked
                   // over it — no default skin, so no pause-on-drag and no
                   // engine PiP button.
-                  child: Stack(
-                    children: [
-                      FastPixVideoSurface(
-                        key: _surfaceKey,
-                        controller: _controller,
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: MediaQuery.sizeOf(context).height * 0.7,
                       ),
-                      Positioned.fill(child: _buildControls()),
-                    ],
+                      child: Stack(
+                        children: [
+                          FastPixVideoSurface(
+                            key: _surfaceKey,
+                            controller: _controller,
+                            matchVideoAspectRatio: true,
+                          ),
+                          Positioned.fill(child: _buildControls()),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
                 if (isCasting)
                   AspectRatio(aspectRatio: 16 / 9, child: _buildCastingStage()),
-                if (_loading && !isCasting)
-                  const Positioned.fill(
-                    child: Center(
-                      child: CircularProgressIndicator(color: AppColors.accent),
-                    ),
-                  ),
+                if (_showsLoader && !isCasting) _buildLoader(),
               ],
             ),
           ),
@@ -783,15 +1001,21 @@ class _WatchScreenState extends State<WatchScreen>
                     Text(_format(position), style: _timeStyle),
                     Expanded(
                       child:
-                          // A live stream reports no length, so there is no
-                          // proportion to draw and nowhere to drag to.
+                          // No length yet means nothing to draw or drag to.
+                          // That is a live stream — or an on-demand one the
+                          // receiver has not reported a duration for yet,
+                          // which must not be labelled LIVE.
                           duration == null
-                          ? const Padding(
-                              padding: EdgeInsets.symmetric(horizontal: 12),
+                          ? Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                              ),
                               child: Text(
-                                'LIVE',
+                                _current?.streamType == StreamType.live
+                                    ? 'LIVE'
+                                    : '--:--',
                                 textAlign: TextAlign.center,
-                                style: TextStyle(
+                                style: const TextStyle(
                                   fontSize: 10,
                                   fontWeight: FontWeight.w800,
                                   letterSpacing: 0.8,
@@ -926,7 +1150,7 @@ class _WatchScreenState extends State<WatchScreen>
   /// session down and building a new one — reconnecting drops the viewer back
   /// to a device picker for a receiver they are already connected to.
   Future<void> _castInstead(DemoStream stream) async {
-    setState(() => _loading = true);
+    setState(_startLoading);
     // Loading a source directly: the player moves its own index to it when the
     // stream is already one of the playlist's items, and reports no position
     // when it is not. Either way the app does not track one.
@@ -1046,6 +1270,15 @@ class _WatchScreenState extends State<WatchScreen>
     controller: _controller,
     title: widget.title,
     onSelect: _goTo,
+  );
+
+  /// Prerendering is as invisible as warming: a promotion shows as the
+  /// absence of a loading gap between items. This says what happened and how long
+  /// the item took to its first frame — above the up-next rail, where testers
+  /// look while moving between items.
+  Widget _buildPrerenderPanel() => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+    child: PrerenderPanel(controller: _controller),
   );
 
   Widget _buildDetails() {

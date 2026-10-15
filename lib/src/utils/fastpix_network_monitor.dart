@@ -27,6 +27,33 @@ class FastPixNetworkMonitor {
   StreamSubscription<List<ConnectivityResult>>? _subscription;
   bool _starting = false;
 
+  /// Broadcast, and never closed: this is a singleton whose listeners come and
+  /// go with the players that hold them.
+  final StreamController<FastPixNetworkType> _changes =
+      StreamController<FastPixNetworkType>.broadcast();
+
+  /// Reports each change in the network type, and nothing while it holds.
+  ///
+  /// Changes only: the first reading taken by [start] is the network as it
+  /// already was and is never reported here. A connection that goes on being
+  /// exactly what it was — a WiFi that stays joined while its internet comes
+  /// and goes — therefore reports nothing, which is the limit of what
+  /// `connectivity_plus` can tell anyone.
+  ///
+  /// Exists for the one thing that has to act on the network coming back: a
+  /// player whose source failed while the device was offline. An
+  /// `AVPlayerItem` that has failed is failed for good — iOS never recovers
+  /// one — so nothing about the network returning reaches it, and the video
+  /// stayed stuck until the viewer loaded a different source. Retrying needs
+  /// to be told, which is what this is for.
+  Stream<FastPixNetworkType> get changes => _changes.stream;
+
+  void _set(FastPixNetworkType next) {
+    if (next == _current) return;
+    _current = next;
+    if (!_changes.isClosed) _changes.add(next);
+  }
+
   /// The last observed network type.
   ///
   /// [FastPixNetworkType.unknown] until [start] has completed its first read,
@@ -46,9 +73,14 @@ class FastPixNetworkMonitor {
       final connectivity = Connectivity();
       // Seed before subscribing: the change stream reports transitions, so a
       // connection that never changes would otherwise never be reported at all.
+      // Assigned, not reported: the first reading is the network as it already
+      // was, not a change in it. Reporting it would tell a listener waiting for
+      // the network to come back that it just had — the moment it started
+      // listening, while the device was still offline — and that is a reload
+      // that cannot succeed.
       _current = classify(await connectivity.checkConnectivity());
       _subscription = connectivity.onConnectivityChanged.listen(
-        (results) => _current = classify(results),
+        (results) => _set(classify(results)),
         // A stream that dies leaves the last known value in place, which is a
         // better answer than reverting to unknown.
         onError: (_) {},
@@ -65,8 +97,14 @@ class FastPixNetworkMonitor {
   Future<void> stop() async {
     await _subscription?.cancel();
     _subscription = null;
+    // Directly, not through [_set]: stopping is not a change in the network,
+    // and a listener waiting to retry must not read it as one.
     _current = FastPixNetworkType.unknown;
   }
+
+  /// Deliver a network change as the platform would. Tests only.
+  @visibleForTesting
+  void debugSetNetwork(FastPixNetworkType type) => _set(type);
 
   /// Reduce the platform's list to the one type worth reporting.
   ///

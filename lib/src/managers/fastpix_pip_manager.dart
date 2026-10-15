@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+
 import '../enums/fastpix_custom_ui_error_code.dart';
 import '../utils/fastpix_audio_session.dart';
 import '../utils/fastpix_pip_channel.dart';
@@ -46,14 +48,43 @@ class FastPixPipManager {
   /// not its job.
   final void Function(bool playing)? _onWindowTransport;
 
+  /// Told when the viewer closed the window without returning to the app.
+  final void Function()? _onWindowDismissed;
+
+  /// Told when a leave that native answered with a PiP request opened no
+  /// window, so the app is off screen without one.
+  final void Function()? _onAutoPipRefused;
+
+  /// Told when the screen locks or unlocks under an open window.
+  final void Function(bool locked)? _onWindowScreenLock;
+
+  /// Told when iOS kept refusing to play and native stopped retrying.
+  final void Function()? _onPlaybackRefused;
+
   FastPixPipManager(
     this._eventManager, {
     bool Function()? hasPreparedSource,
     void Function(bool playing)? onWindowTransport,
+    void Function()? onWindowDismissed,
+    void Function()? onAutoPipRefused,
+    void Function(bool locked)? onWindowScreenLock,
+    void Function()? onPlaybackRefused,
   })  : _hasPreparedSource = hasPreparedSource ?? _always,
-        _onWindowTransport = onWindowTransport {
+        _onWindowTransport = onWindowTransport,
+        _onWindowDismissed = onWindowDismissed,
+        _onAutoPipRefused = onAutoPipRefused,
+        _onWindowScreenLock = onWindowScreenLock,
+        _onPlaybackRefused = onPlaybackRefused {
     FastPixPipChannel.ensureListening();
     FastPixPipChannel.onStateChanged = notifyActive;
+    FastPixPipChannel.onDismissed = () => _onWindowDismissed?.call();
+    FastPixPipChannel.onAutoPipRefused = () {
+      _setPending(false);
+      _onAutoPipRefused?.call();
+    };
+    FastPixPipChannel.onScreenLockChanged = (locked) =>
+        _onWindowScreenLock?.call(locked);
+    FastPixPipChannel.onPlaybackRefused = () => _onPlaybackRefused?.call();
     FastPixPipChannel.onFailure = (reason) =>
         _error(reason, FastPixCustomUIErrorCode.pipFailed);
     // Play and pause performed in the PiP window reach the platform's player
@@ -61,13 +92,45 @@ class FastPixPipManager {
     // that stopped when the viewer tapped pause in the window.
     FastPixPipChannel.onPlaybackChanged = (playing) =>
         _onWindowTransport?.call(playing);
+    // The platform side is app-wide: a manager built after another one turned
+    // PiP off must not inherit that.
+    if (!_platformEnabled) _sendEnabled(true);
   }
 
   static bool _always() => true;
 
-  /// Master on/off switch, matching the iOS manager's `isEnabled`. When false,
-  /// every request is a no-op and [isPipAvailable] returns false.
-  bool enabled = true;
+  /// What the platform was last told by any manager. Starts enabled, as the
+  /// platform does, so a host that never switches PiP off sends nothing.
+  static bool _platformEnabled = true;
+
+  static void _sendEnabled(bool value) {
+    _platformEnabled = value;
+    unawaited(FastPixPipChannel.setEnabled(value));
+  }
+
+  /// Master on/off switch for Picture-in-Picture. When false, every request is
+  /// a no-op, [isPipAvailable] returns false, and no window opens on its own
+  /// either — including the one iOS starts by itself when it treats the video
+  /// as full screen, which [autoEnterOnBackground] cannot prevent. A window
+  /// open at the moment it is switched off is closed.
+  bool get enabled => _enabled;
+  bool _enabled = true;
+
+  set enabled(bool value) {
+    if (value == _enabled) return;
+    _enabled = value;
+    _sendEnabled(value);
+    _refreshArmed();
+    if (!value && (_active || _pending)) unawaited(FastPixPipChannel.exit());
+  }
+
+  /// Tests only: forget what the platform was told.
+  @visibleForTesting
+  static void debugResetPlatformEnabled() {
+    _platformEnabled = true;
+    _armedManagers.clear();
+    _platformArmed = false;
+  }
 
   /// Whether leaving the app while a video is playing should open a PiP window
   /// on its own, the way a viewer expects after using any large video app.
@@ -97,6 +160,7 @@ class FastPixPipManager {
 
   set autoEnterOnBackground(bool value) {
     _autoEnterOnBackground = value;
+    _refreshArmed();
     if (!value) {
       unawaited(FastPixPipChannel.setAutoEnter(false));
       return;
@@ -114,6 +178,45 @@ class FastPixPipManager {
       'so leaving the app will pause playback instead.',
       FastPixCustomUIErrorCode.pipUnsupported,
     );
+  }
+
+  /// Whether this manager's video is playing, as the controller last said.
+  bool _playing = false;
+
+  /// Whether leaving now should open a window for this manager's video.
+  bool _armed = false;
+
+  /// The managers currently armed. The platform's answer is app-wide — one
+  /// activity, one PiP window — so it is armed while any of them is, and a
+  /// paused feed tile cannot disarm the video that is playing.
+  static final Set<FastPixPipManager> _armedManagers = <FastPixPipManager>{};
+
+  /// What the platform was last told about arming.
+  static bool _platformArmed = false;
+
+  /// The controller's playback changed. Sent on every snapshot; only a change
+  /// in the armed answer reaches the platform.
+  void updatePlaying(bool playing) {
+    _playing = playing;
+    _refreshArmed();
+  }
+
+  void _refreshArmed() {
+    final armed = _enabled && _autoEnterOnBackground && _playing;
+    if (armed == _armed) return;
+    _armed = armed;
+    armed ? _armedManagers.add(this) : _armedManagers.remove(this);
+    final any = _armedManagers.isNotEmpty;
+    if (any == _platformArmed) return;
+    _platformArmed = any;
+    unawaited(FastPixPipChannel.setAutoEnterArmed(any));
+  }
+
+  /// Native already asked for a window on this leave. Recorded as pending so
+  /// the pause rule leaves the video alone while the window opens; cleared by
+  /// the window's report, a refusal, or a reconcile on return.
+  void markAutoPipPending() {
+    if (_enabled) _setPending(true);
   }
 
   /// Last value handed to [setPipAudioBehavior]. Re-applied whenever the audio
@@ -147,6 +250,23 @@ class FastPixPipManager {
 
   bool _pending = false;
 
+  void _setPending(bool value) {
+    _pending = value;
+    _pendingChanges.value = value;
+  }
+
+  final ValueNotifier<bool> _pendingChanges = ValueNotifier<bool>(false);
+
+  /// Fires when a request becomes pending or stops being so — a change no
+  /// [FastPixPipChangedEvent] announces, because no window opened or closed.
+  ///
+  /// For the SDK's own widgets. On Android a pending window decides the
+  /// layout, and when automatic PiP is recorded pending at the pause, nothing
+  /// else rebuilds the player before Android shrinks the activity: the page
+  /// tree was only re-laid out at thumbnail size, overflowing and measuring
+  /// the thumbnail as the inline size.
+  ValueListenable<bool> get pendingChanges => _pendingChanges;
+
   /// Whether the device can do PiP right now. Async because the platform is
   /// asked rather than assumed.
   Future<bool> isPipAvailable() async {
@@ -160,7 +280,7 @@ class FastPixPipManager {
 
     // Before the first await, deliberately: everything below yields, and the
     // backgrounding this call races with is already on its way.
-    _pending = true;
+    _setPending(true);
 
     if (!_hasPreparedSource()) {
       _error(
@@ -197,7 +317,7 @@ class FastPixPipManager {
     // Only an accepted request stays pending — until the platform reports the
     // window open. A refusal is an answer, and leaving it pending would keep
     // playback un-pausable for the rest of the session.
-    if (result != FastPixPipChannel.pipEnterOk) _pending = false;
+    if (result != FastPixPipChannel.pipEnterOk) _setPending(false);
 
     switch (result) {
       case FastPixPipChannel.pipEnterOk:
@@ -269,7 +389,7 @@ class FastPixPipManager {
   /// iOS never suspends playback, so the rate never drops and the loop has
   /// nothing to start from. `UIBackgroundModes: audio` in Info.plist is the
   /// other half of this and cannot substitute for it.
-  Future<void> applyAudioSession() =>
+  Future<bool> applyAudioSession() =>
       FastPixAudioSession.claimPlayback(mixWithOthers: _mixWithOthers);
 
   /// The platform reported that a PiP window opened or closed.
@@ -279,7 +399,8 @@ class FastPixPipManager {
   void notifyActive(bool active) {
     // Cleared even when the state is unchanged: a request that produced no
     // transition still has its answer.
-    _pending = false;
+    _setPending(false);
+    debugPrint('DIAG pip state reported active=$active was=$_active'); // TEMP-DIAG
     if (active == _active) return;
     _active = active;
     _eventManager.emit(
@@ -321,7 +442,7 @@ class FastPixPipManager {
   /// native's to manage — it tracks layers weakly, so a replaced platform view
   /// drops out of its table without Dart telling it to.
   void resetForNewSource() {
-    _pending = false;
+    _setPending(false);
   }
 
   /// Release the channel listeners this manager installed.
@@ -329,6 +450,12 @@ class FastPixPipManager {
     FastPixPipChannel.onStateChanged = null;
     FastPixPipChannel.onFailure = null;
     FastPixPipChannel.onPlaybackChanged = null;
+    FastPixPipChannel.onDismissed = null;
+    FastPixPipChannel.onAutoPipRefused = null;
+    FastPixPipChannel.onScreenLockChanged = null;
+    FastPixPipChannel.onPlaybackRefused = null;
+    // A disposed controller plays nothing, so it must not keep the app armed.
+    updatePlaying(false);
   }
 
   void _error(String message, FastPixCustomUIErrorCode code) {

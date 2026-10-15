@@ -25,33 +25,53 @@ class FastPixUserLeaveHint {
 
   static const String _method = 'onUserLeaveHint';
 
-  static final Set<void Function()> _listeners = <void Function()>{};
+  /// Native did nothing about PiP: automatic PiP was not armed.
+  static const String pipNone = 'none';
+
+  /// Native already asked for a window — Android 12+ opens it from the armed
+  /// parameters, older versions were asked inside the hint. Dart must not ask
+  /// again; the window, or `autoPipRefused`, follows.
+  static const String pipRequested = 'requested';
+
+  /// Native asked inside the hint and the platform refused.
+  static const String pipRefused = 'refused';
+
+  static final Set<void Function(String? pip)> _listeners =
+      <void Function(String? pip)>{};
 
   static bool _handlerInstalled = false;
 
   /// Register [listener], installing the channel handler on first use so an app
   /// that never asks for automatic PiP pays nothing.
-  static void addListener(void Function() listener) {
+  ///
+  /// The listener is given what native did about PiP for this leave
+  /// ([pipNone], [pipRequested], [pipRefused]), or null from a native side
+  /// that does not say.
+  static void addListener(void Function(String? pip) listener) {
     _listeners.add(listener);
     if (_handlerInstalled) return;
     _handlerInstalled = true;
     _channel.setMethodCallHandler(_handle);
   }
 
-  static void removeListener(void Function() listener) =>
+  static void removeListener(void Function(String? pip) listener) =>
       _listeners.remove(listener);
 
   static Future<void> _handle(MethodCall call) async {
     if (call.method != _method) return;
+    final args = (call.arguments as Map?)?.cast<String, dynamic>();
+    final pip = args?['pip'] as String?;
     // Over a copy: a listener may remove itself while being told.
     for (final listener in _listeners.toList()) {
-      listener();
+      listener(pip);
     }
   }
 
   /// Deliver a hint as the platform would. Tests only.
   @visibleForTesting
-  static Future<void> debugSendHint() => _handle(const MethodCall(_method));
+  static Future<void> debugSendHint([String? pip]) => _handle(
+        MethodCall(_method, pip == null ? null : <String, dynamic>{'pip': pip}),
+      );
 
   /// Drop every listener and the handler. Tests only.
   @visibleForTesting
